@@ -48,6 +48,20 @@ From inside a Django project (or a subdirectory):
 /path/to/lazy-django
 ```
 
+## Install (Homebrew)
+
+```bash
+brew tap William-Blackie/lazydjango https://github.com/William-Blackie/lazydjango
+brew install William-Blackie/lazydjango/lazy-django
+```
+
+Troubleshooting:
+
+- `No available formula with the name "lazydjango"`: use the full formula path above (`.../lazy-django`).
+- `Repository not found`: use the explicit tap URL shown above. If the repo is private, users need repo access.
+- `Apple could not verify "lazy-django"`: clear quarantine on the Homebrew binary target (not a shell/pyenv shim):
+  `BREW_BIN="$(brew --prefix)/bin/lazy-django"; TARGET="$(readlink "$BREW_BIN" 2>/dev/null || echo "$BREW_BIN")"; xattr -dr com.apple.quarantine "$TARGET"`
+
 Preflight dependency check (recommended before release):
 
 ```bash

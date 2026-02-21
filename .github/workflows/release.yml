@@ -33,21 +33,26 @@ jobs:
         id: release_args
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
           args="release --clean"
           reason=""
+          token="${HOMEBREW_TAP_TOKEN:-}"
+          if [[ -z "${token}" ]]; then
+            token="${GITHUB_TOKEN:-}"
+          fi
 
-          if [[ -z "${HOMEBREW_TAP_TOKEN:-}" ]]; then
-            reason="HOMEBREW_TAP_GITHUB_TOKEN is not configured"
+          if [[ -z "${token}" ]]; then
+            reason="no usable GitHub token for Homebrew publishing"
           else
             api_url="https://api.github.com/repos/${HOMEBREW_TAP_OWNER}/${HOMEBREW_TAP_NAME}"
             status_code="$(
               curl -sS \
                 -o /tmp/tap_repo.json \
                 -w "%{http_code}" \
-                -H "Authorization: Bearer ${HOMEBREW_TAP_TOKEN}" \
+                -H "Authorization: Bearer ${token}" \
                 -H "Accept: application/vnd.github+json" \
                 "${api_url}"
             )"
@@ -80,6 +85,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN != '' && secrets.HOMEBREW_TAP_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_OWNER: ${{ env.HOMEBREW_TAP_OWNER }}
           HOMEBREW_TAP_NAME: ${{ env.HOMEBREW_TAP_NAME }}

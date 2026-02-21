@@ -48,17 +48,19 @@ changelog:
       - "^test:"
       - "^chore:"
 
-homebrew_casks:
+brews:
   - name: lazy-django
-    binaries:
-      - lazy-django
     homepage: "https://github.com/{{ .Env.GITHUB_REPOSITORY }}"
     description: "Keyboard-first TUI for Django workflows."
     repository:
       owner: "{{ .Env.HOMEBREW_TAP_OWNER }}"
       name: "{{ .Env.HOMEBREW_TAP_NAME }}"
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    directory: Casks
+    directory: Formula
     commit_author:
       name: lazy-django-bot
       email: github-actions[bot]@users.noreply.github.com
+    install: |
+      bin.install "lazy-django"
+    test: |
+      system "#{bin}/lazy-django", "--version"
