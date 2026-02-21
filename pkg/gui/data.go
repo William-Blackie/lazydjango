@@ -325,9 +325,8 @@ func (gui *Gui) convertFieldValue(value string, fieldType string) interface{} {
 
 func (gui *Gui) showMessage(title, message string) error {
 	if gui.currentModel == "" {
-		gui.resetOutput(OutputTabCommand, title)
-		gui.appendOutput(OutputTabCommand, message+"\n")
-		gui.switchOutputTab(OutputTabCommand)
+		tabID := gui.startCommandOutputTab(title)
+		gui.appendOutput(tabID, message+"\n")
 		gui.refreshOutputView()
 		_ = gui.switchPanel(MainWindow)
 		return nil

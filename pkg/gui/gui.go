@@ -2,6 +2,7 @@ package gui
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,10 +13,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/awesome-gocui/gocui"
 	"github.com/williamblackie/lazydjango/pkg/config"
 	"github.com/williamblackie/lazydjango/pkg/django"
+	updatepkg "github.com/williamblackie/lazydjango/pkg/update"
 )
 
 // Gui represents the main TUI state.
@@ -25,15 +28,24 @@ type Gui struct {
 	project *django.Project
 
 	// Global state
-	currentWindow      string
-	mainTitle          string
-	commandHistory     []string
-	serverCmd          *exec.Cmd
-	outputTab          string
-	outputCommandTitle string
-	outputCommandText  string
-	outputLogsTitle    string
-	outputLogsText     string
+	currentWindow       string
+	mainTitle           string
+	commandHistory      []string
+	serverCmd           *exec.Cmd
+	appVersion          string
+	updateChecked       bool
+	updateChecking      bool
+	updateAvailable     bool
+	updateLatestVersion string
+	updateReleaseURL    string
+	updateCheckError    string
+	updateNoticeShown   bool
+	updateCheckStarted  bool
+	outputTab           string // currently selected output tab ID
+	outputTabs          map[string]*outputTabState
+	outputOrder         []string
+	outputRoutes        map[string]string // logical route (command/logs) -> tab ID
+	outputCounter       int
 
 	// Selection state for left panels
 	menuSelection int
@@ -108,6 +120,14 @@ type makeTarget struct {
 	section     string
 }
 
+type outputTabState struct {
+	id         string
+	route      string
+	title      string
+	text       string
+	autoscroll bool
+}
+
 func clampSelection(selection, count int) int {
 	if count <= 0 {
 		return 0
@@ -129,13 +149,8 @@ func (gui *Gui) panelTitle(windowName, label string) string {
 }
 
 func (gui *Gui) projectActions() []projectAction {
-	runLabel := "Run dev server"
-	if gui.makeTargetExists("runserver") {
-		runLabel = "Run dev server (make runserver)"
-	}
-
 	actions := []projectAction{
-		{label: runLabel, internal: "runserver"},
+		{label: "Run dev server", internal: "runserver"},
 		{label: "Stop dev server", internal: "stopserver"},
 	}
 
@@ -164,32 +179,19 @@ func (gui *Gui) projectContainerActions() []projectAction {
 }
 
 func (gui *Gui) projectMigrationActions() []projectAction {
-	if gui.makeTargetExists("showmigrations") || gui.makeTargetExists("migrations") || gui.makeTargetExists("migrate") {
-		actions := make([]projectAction, 0, 3)
-		if t, ok := gui.makeTargetByName("showmigrations"); ok {
-			label := "make showmigrations"
-			if t.description != "" {
-				label = fmt.Sprintf("make showmigrations - %s", t.description)
-			}
-			actions = append(actions, projectAction{label: label, makeTarget: "showmigrations"})
+	actions := make([]projectAction, 0, 4)
+	for _, target := range []string{"showmigrations", "migrations", "migrate", "migrate-site"} {
+		t, ok := gui.makeTargetByName(target)
+		if !ok {
+			continue
 		}
-		if t, ok := gui.makeTargetByName("migrations"); ok {
-			label := "make migrations"
-			if t.description != "" {
-				label = fmt.Sprintf("make migrations - %s", t.description)
-			}
-			actions = append(actions, projectAction{label: label, makeTarget: "migrations"})
-		}
-		if t, ok := gui.makeTargetByName("migrate"); ok {
-			label := "make migrate"
-			if t.description != "" {
-				label = fmt.Sprintf("make migrate - %s", t.description)
-			}
-			actions = append(actions, projectAction{label: label, makeTarget: "migrate"})
-		}
-		if len(actions) > 0 {
-			return actions
-		}
+		actions = append(actions, projectAction{
+			label:      makeActionLabel(t),
+			makeTarget: t.name,
+		})
+	}
+	if len(actions) > 0 {
+		return actions
 	}
 
 	applied, total := gui.migrationSummary()
@@ -201,66 +203,12 @@ func (gui *Gui) projectMigrationActions() []projectAction {
 }
 
 func (gui *Gui) projectToolActions() []projectAction {
-	actions := make([]projectAction, 0, 12)
-
-	if t, ok := gui.makeTargetByName("test"); ok {
-		label := "make test"
-		if t.description != "" {
-			label = fmt.Sprintf("make test - %s", t.description)
-		}
-		actions = append(actions, projectAction{label: label, makeTarget: "test"})
-	}
-	if t, ok := gui.makeTargetByName("test-parallel"); ok {
-		label := "make test-parallel"
-		if t.description != "" {
-			label = fmt.Sprintf("make test-parallel - %s", t.description)
-		}
-		actions = append(actions, projectAction{label: label, makeTarget: "test-parallel"})
-	}
-	if t, ok := gui.makeTargetByName("testmon"); ok {
-		label := "make testmon"
-		if t.description != "" {
-			label = fmt.Sprintf("make testmon - %s", t.description)
-		}
-		actions = append(actions, projectAction{label: label, makeTarget: "testmon"})
-	}
-	if t, ok := gui.makeTargetByName("shell"); ok {
-		label := "make shell"
-		if t.description != "" {
-			label = fmt.Sprintf("make shell - %s", t.description)
-		}
-		actions = append(actions, projectAction{label: label, makeTarget: "shell"})
-	}
-	if t, ok := gui.makeTargetByName("dbshell"); ok {
-		label := "make dbshell"
-		if t.description != "" {
-			label = fmt.Sprintf("make dbshell - %s", t.description)
-		}
-		actions = append(actions, projectAction{label: label, makeTarget: "dbshell"})
-	}
-	if t, ok := gui.makeTargetByName("lint"); ok {
-		label := "make lint"
-		if t.description != "" {
-			label = fmt.Sprintf("make lint - %s", t.description)
-		}
-		actions = append(actions, projectAction{label: label, makeTarget: "lint"})
-	}
-	if t, ok := gui.makeTargetByName("format"); ok {
-		label := "make format"
-		if t.description != "" {
-			label = fmt.Sprintf("make format - %s", t.description)
-		}
-		actions = append(actions, projectAction{label: label, makeTarget: "format"})
-	}
-
-	actions = append(actions,
+	return []projectAction{
 		projectAction{label: "Django check", command: "check"},
 		projectAction{label: "Show URL patterns", internal: "showurls"},
 		projectAction{label: "Dependency doctor", internal: "doctor"},
 		projectAction{label: "Refresh project data", internal: "refresh"},
-	)
-
-	return actions
+	}
 }
 
 func (gui *Gui) sortedModels() []django.Model {
@@ -509,9 +457,8 @@ func (gui *Gui) projectMakeActions() []projectAction {
 	}
 
 	priority := []string{
-		"up", "up-all", "down", "restart", "restart-all",
-		"runserver", "shell", "dbshell",
-		"migrations", "migrate", "migrate-site", "showmigrations", "loaddata",
+		"up", "up-all", "down", "restart", "restart-all", "loaddata",
+		"shell", "dbshell",
 		"test", "test-parallel", "testmon", "testmon-all", "test-cov", "test-reset-db",
 		"lint", "format",
 		"webpack", "watch", "storybook",
@@ -519,25 +466,31 @@ func (gui *Gui) projectMakeActions() []projectAction {
 	}
 
 	actions := make([]projectAction, 0)
-	seen := make(map[string]struct{}, len(priority))
 
 	for _, name := range priority {
 		t, ok := targetMap[name]
 		if !ok {
 			continue
 		}
-		label := fmt.Sprintf("make %s", t.name)
-		if t.description != "" {
-			label = fmt.Sprintf("make %s - %s", t.name, t.description)
-		}
 		actions = append(actions, projectAction{
-			label:      label,
+			label:      makeActionLabel(t),
 			makeTarget: t.name,
 		})
-		seen[t.name] = struct{}{}
 	}
 
 	return actions
+}
+
+func makeActionLabel(t makeTarget) string {
+	label := t.name
+	desc := strings.TrimSpace(t.description)
+	if desc == "" {
+		return label
+	}
+	if strings.EqualFold(desc, t.name) {
+		return label
+	}
+	return fmt.Sprintf("%s - %s", label, desc)
 }
 
 // NewGui creates a new GUI.
@@ -552,16 +505,17 @@ func NewGui(project *django.Project) (*Gui, error) {
 	}
 
 	gui := &Gui{
-		g:                  g,
-		config:             config.GetDefaultConfig(),
-		project:            project,
-		currentWindow:      MenuWindow,
-		mainTitle:          "Output",
-		outputTab:          OutputTabCommand,
-		outputCommandTitle: "Command",
-		outputLogsTitle:    "Logs",
-		pageSize:           20,
-		currentPage:        1,
+		g:             g,
+		config:        config.GetDefaultConfig(),
+		project:       project,
+		currentWindow: MenuWindow,
+		mainTitle:     "Output",
+		appVersion:    "dev",
+		outputTabs:    make(map[string]*outputTabState),
+		outputOrder:   make([]string, 0),
+		outputRoutes:  make(map[string]string),
+		pageSize:      20,
+		currentPage:   1,
 	}
 
 	g.Highlight = false
@@ -659,6 +613,10 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 	optionsView.Frame = false
 	gui.updateOptionsView(optionsView)
 
+	if !gui.updateCheckStarted {
+		gui.startUpdateCheck()
+	}
+
 	if gui.isModalOpen {
 		modalWidth := 80
 		modalHeight := 20
@@ -705,97 +663,388 @@ func (gui *Gui) mainTitleLabel() string {
 	return gui.mainTitle
 }
 
-func (gui *Gui) outputTitleForTab(tab string) string {
-	if tab == OutputTabLogs {
-		if strings.TrimSpace(gui.outputLogsTitle) == "" {
-			return "Logs"
-		}
-		return gui.outputLogsTitle
+func isReleaseVersion(version string) bool {
+	version = strings.TrimSpace(version)
+	version = strings.TrimPrefix(version, "v")
+	if version == "" {
+		return false
 	}
-	if strings.TrimSpace(gui.outputCommandTitle) == "" {
+	matched, _ := regexp.MatchString(`^\d+\.\d+(\.\d+)?$`, version)
+	return matched
+}
+
+func (gui *Gui) setAppVersion(version string) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		version = "dev"
+	}
+	gui.appVersion = version
+}
+
+func (gui *Gui) updateStatusLine() string {
+	if !isReleaseVersion(gui.appVersion) {
+		return "n/a (dev build)"
+	}
+	if gui.updateChecking {
+		return "checking..."
+	}
+	if gui.updateAvailable {
+		return fmt.Sprintf("%s available (U)", gui.updateLatestVersion)
+	}
+	if gui.updateChecked {
+		return "up to date"
+	}
+	if gui.updateCheckError != "" {
+		return "check failed"
+	}
+	return "pending"
+}
+
+func (gui *Gui) updatePromptBody() string {
+	var b strings.Builder
+	fmt.Fprintln(&b, "LazyDjango update check")
+	fmt.Fprintln(&b)
+	fmt.Fprintf(&b, "Current version: %s\n", gui.appVersion)
+
+	if gui.updateAvailable {
+		fmt.Fprintf(&b, "Latest version:  %s\n", gui.updateLatestVersion)
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, "Upgrade:")
+		fmt.Fprintln(&b, "  brew upgrade William-Blackie/lazydjango/lazy-django")
+		if strings.TrimSpace(gui.updateReleaseURL) != "" {
+			fmt.Fprintf(&b, "  or download from: %s\n", gui.updateReleaseURL)
+		}
+		return b.String()
+	}
+
+	if gui.updateChecking {
+		fmt.Fprintln(&b, "Update check is in progress...")
+		return b.String()
+	}
+
+	if gui.updateCheckError != "" {
+		fmt.Fprintf(&b, "Update check failed: %s\n", gui.updateCheckError)
+		if strings.TrimSpace(gui.updateReleaseURL) != "" {
+			fmt.Fprintf(&b, "You can still check releases manually: %s\n", gui.updateReleaseURL)
+		}
+		return b.String()
+	}
+
+	if !isReleaseVersion(gui.appVersion) {
+		fmt.Fprintln(&b, "Running a development build; automatic release checks are skipped.")
+		return b.String()
+	}
+
+	fmt.Fprintln(&b, "You are running the latest release.")
+	if strings.TrimSpace(gui.updateLatestVersion) != "" {
+		fmt.Fprintf(&b, "Latest version: %s\n", gui.updateLatestVersion)
+	}
+	return b.String()
+}
+
+func (gui *Gui) showUpdatePromptInOutput() {
+	tabID := gui.startCommandOutputTab("LazyDjango Update")
+	gui.appendOutput(tabID, gui.updatePromptBody())
+	gui.refreshOutputView()
+}
+
+func (gui *Gui) startUpdateCheck() {
+	if gui.updateCheckStarted {
+		return
+	}
+	gui.updateCheckStarted = true
+
+	if !isReleaseVersion(gui.appVersion) {
+		gui.updateChecked = true
+		gui.updateChecking = false
+		return
+	}
+
+	gui.updateChecking = true
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
+		res, err := updatepkg.CheckLatest(ctx, gui.appVersion)
+		gui.g.Update(func(g *gocui.Gui) error {
+			gui.updateChecking = false
+			gui.updateChecked = true
+
+			if err != nil {
+				gui.updateCheckError = err.Error()
+				gui.updateReleaseURL = "https://github.com/William-Blackie/lazydjango/releases/latest"
+			} else {
+				gui.updateCheckError = ""
+				gui.updateAvailable = res.UpdateAvailable
+				gui.updateLatestVersion = res.LatestVersion
+				gui.updateReleaseURL = res.LatestReleaseURL
+				if gui.updateAvailable && !gui.updateNoticeShown {
+					gui.updateNoticeShown = true
+					gui.showUpdatePromptInOutput()
+				}
+			}
+
+			if menuView, viewErr := g.View(MenuWindow); viewErr == nil {
+				gui.renderProjectList(menuView)
+			}
+			if optionsView, viewErr := g.View(OptionsWindow); viewErr == nil {
+				gui.updateOptionsView(optionsView)
+			}
+			return nil
+		})
+	}()
+}
+
+func isOutputRoute(tab string) bool {
+	return tab == OutputTabCommand || tab == OutputTabLogs
+}
+
+func outputRouteLabel(route string) string {
+	if route == OutputTabLogs {
+		return "Logs"
+	}
+	return "Command"
+}
+
+func outputDefaultTitle(route string) string {
+	if route == OutputTabLogs {
+		return "Logs"
+	}
+	if route == OutputTabCommand {
 		return "Command"
 	}
-	return gui.outputCommandTitle
+	return "Output"
+}
+
+func (gui *Gui) ensureOutputState() {
+	if gui.outputTabs == nil {
+		gui.outputTabs = make(map[string]*outputTabState)
+	}
+	if gui.outputRoutes == nil {
+		gui.outputRoutes = make(map[string]string)
+	}
+	if gui.outputOrder == nil {
+		gui.outputOrder = make([]string, 0)
+	}
+}
+
+func (gui *Gui) latestOutputTabForRoute(route string) string {
+	for i := len(gui.outputOrder) - 1; i >= 0; i-- {
+		id := gui.outputOrder[i]
+		tab, ok := gui.outputTabs[id]
+		if !ok {
+			continue
+		}
+		if tab.route == route {
+			return id
+		}
+	}
+	return ""
+}
+
+func (gui *Gui) resolveOutputTabID(tab string, createIfMissing bool) string {
+	gui.ensureOutputState()
+
+	if tab == "" {
+		if gui.outputTab != "" {
+			if _, ok := gui.outputTabs[gui.outputTab]; ok {
+				return gui.outputTab
+			}
+			gui.outputTab = ""
+		}
+		for i := len(gui.outputOrder) - 1; i >= 0; i-- {
+			id := gui.outputOrder[i]
+			if _, ok := gui.outputTabs[id]; ok {
+				return id
+			}
+		}
+		if createIfMissing {
+			return gui.startOutputTab(OutputTabCommand, outputDefaultTitle(OutputTabCommand), false)
+		}
+		return ""
+	}
+
+	if _, ok := gui.outputTabs[tab]; ok {
+		return tab
+	}
+
+	if mapped, ok := gui.outputRoutes[tab]; ok {
+		if _, exists := gui.outputTabs[mapped]; exists {
+			return mapped
+		}
+		delete(gui.outputRoutes, tab)
+	}
+
+	if !isOutputRoute(tab) {
+		return ""
+	}
+
+	latest := gui.latestOutputTabForRoute(tab)
+	if latest != "" {
+		gui.outputRoutes[tab] = latest
+		return latest
+	}
+
+	if createIfMissing {
+		return gui.startOutputTab(tab, outputDefaultTitle(tab), tab == OutputTabLogs)
+	}
+
+	return ""
+}
+
+func (gui *Gui) outputTabPosition(tabID string) int {
+	for idx, id := range gui.outputOrder {
+		if id == tabID {
+			return idx
+		}
+	}
+	return -1
+}
+
+func (gui *Gui) startOutputTab(route, title string, autoscroll bool) string {
+	gui.ensureOutputState()
+	if !isOutputRoute(route) {
+		route = OutputTabCommand
+	}
+	if strings.TrimSpace(title) == "" {
+		title = outputDefaultTitle(route)
+	}
+
+	gui.outputCounter++
+	id := fmt.Sprintf("%s-%03d", route, gui.outputCounter)
+	gui.outputTabs[id] = &outputTabState{
+		id:         id,
+		route:      route,
+		title:      title,
+		autoscroll: autoscroll,
+	}
+	gui.outputOrder = append(gui.outputOrder, id)
+	gui.outputRoutes[route] = id
+	gui.outputTab = id
+
+	if gui.currentModel == "" {
+		gui.refreshOutputView()
+	}
+
+	return id
+}
+
+func (gui *Gui) startCommandOutputTab(title string) string {
+	return gui.startOutputTab(OutputTabCommand, title, false)
+}
+
+func (gui *Gui) startLogsOutputTab(title string) string {
+	return gui.startOutputTab(OutputTabLogs, title, true)
+}
+
+func (gui *Gui) outputTitleForTab(tab string) string {
+	id := gui.resolveOutputTabID(tab, false)
+	if id == "" {
+		return outputDefaultTitle(tab)
+	}
+	title := strings.TrimSpace(gui.outputTabs[id].title)
+	if title == "" {
+		return outputDefaultTitle(gui.outputTabs[id].route)
+	}
+	return title
 }
 
 func (gui *Gui) outputTextForTab(tab string) string {
-	if tab == OutputTabLogs {
-		return gui.outputLogsText
+	id := gui.resolveOutputTabID(tab, false)
+	if id == "" {
+		return ""
 	}
-	return gui.outputCommandText
+	return gui.outputTabs[id].text
 }
 
 func (gui *Gui) setOutputTextForTab(tab, text string) {
-	if tab == OutputTabLogs {
-		gui.outputLogsText = text
+	id := gui.resolveOutputTabID(tab, true)
+	if id == "" {
 		return
 	}
-	gui.outputCommandText = text
+	gui.outputTabs[id].text = text
 }
 
 func (gui *Gui) setOutputTitleForTab(tab, title string) {
-	if tab == OutputTabLogs {
-		gui.outputLogsTitle = title
+	id := gui.resolveOutputTabID(tab, true)
+	if id == "" {
 		return
 	}
-	gui.outputCommandTitle = title
+	if strings.TrimSpace(title) == "" {
+		title = outputDefaultTitle(gui.outputTabs[id].route)
+	}
+	gui.outputTabs[id].title = title
 }
 
 func (gui *Gui) appendOutput(tab, text string) {
-	current := gui.outputTextForTab(tab)
-	gui.setOutputTextForTab(tab, current+text)
+	id := gui.resolveOutputTabID(tab, true)
+	if id == "" {
+		return
+	}
+	gui.outputTabs[id].text += text
 }
 
 func (gui *Gui) resetOutput(tab, title string) {
-	if strings.TrimSpace(title) == "" {
-		title = "Output"
+	id := gui.resolveOutputTabID(tab, true)
+	if id == "" {
+		return
 	}
-	gui.setOutputTitleForTab(tab, title)
-	gui.setOutputTextForTab(tab, "")
+	if strings.TrimSpace(title) == "" {
+		title = outputDefaultTitle(gui.outputTabs[id].route)
+	}
+	gui.outputTabs[id].title = title
+	gui.outputTabs[id].text = ""
 }
 
 func (gui *Gui) switchOutputTab(tab string) {
-	if tab != OutputTabCommand && tab != OutputTabLogs {
+	id := gui.resolveOutputTabID(tab, false)
+	if id == "" {
 		return
 	}
-	gui.outputTab = tab
+	gui.outputTab = id
 	if gui.currentModel == "" {
 		gui.refreshOutputView()
 	}
 }
 
 func (gui *Gui) currentOutputTabLabel() string {
-	if gui.outputTab == OutputTabLogs {
-		return "Logs"
+	id := gui.resolveOutputTabID("", false)
+	if id == "" {
+		return "Output"
 	}
-	return "Command"
+	return outputRouteLabel(gui.outputTabs[id].route)
 }
 
 func (gui *Gui) renderOutputView(v *gocui.View) {
-	if gui.outputTab != OutputTabLogs {
-		gui.outputTab = OutputTabCommand
+	v.Clear()
+	tabID := gui.resolveOutputTabID("", false)
+	if tabID == "" {
+		v.Autoscroll = false
+		gui.mainTitle = "Output"
+		v.Title = gui.panelTitle(MainWindow, "Output")
+		fmt.Fprintln(v, "LazyDjango")
+		fmt.Fprintln(v)
+		fmt.Fprintln(v, "No output tabs yet.")
+		fmt.Fprintln(v, "Run any project/data command to create a new output tab.")
+		fmt.Fprintln(v)
+		fmt.Fprintln(v, "Keys: [ previous, ] next, o toggle cmd/log, x close tab, Ctrl+L clear tab.")
+		return
 	}
 
-	v.Clear()
-	v.Autoscroll = gui.outputTab == OutputTabLogs
-	title := fmt.Sprintf("%s [%s]", gui.outputTitleForTab(gui.outputTab), gui.currentOutputTabLabel())
+	tab := gui.outputTabs[tabID]
+	v.Autoscroll = tab.autoscroll
+	totalTabs := len(gui.outputOrder)
+	tabIndex := gui.outputTabPosition(tabID) + 1
+	title := fmt.Sprintf("%s [%s %d/%d]", gui.outputTitleForTab(tabID), outputRouteLabel(tab.route), tabIndex, totalTabs)
 	gui.mainTitle = title
 	v.Title = gui.panelTitle(MainWindow, title)
 
-	text := gui.outputTextForTab(gui.outputTab)
+	text := gui.outputTextForTab(tabID)
 	if strings.TrimSpace(text) == "" {
-		if gui.outputTab == OutputTabLogs {
-			fmt.Fprintln(v, "No logs yet.")
-			fmt.Fprintln(v)
-			fmt.Fprintln(v, "Long-running processes (dev server, make watch/up, logs) appear here.")
-		} else {
-			fmt.Fprintln(v, "LazyDjango")
-			fmt.Fprintln(v)
-			fmt.Fprintln(v, "No command output yet.")
-			fmt.Fprintln(v, "Use Project actions or Make Tasks to run workflows.")
-			fmt.Fprintln(v)
-			fmt.Fprintln(v, "Keys: o toggle tab, [ previous tab, ] next tab, Ctrl+L clear tab.")
-		}
+		fmt.Fprintln(v, "No output in this tab yet.")
+		fmt.Fprintln(v)
+		fmt.Fprintln(v, "Each command creates a new tab.")
+		fmt.Fprintln(v, "Use [ and ] to switch tabs, x to close, Ctrl+L to clear.")
 		return
 	}
 
@@ -855,6 +1104,7 @@ func (gui *Gui) renderProjectList(v *gocui.View) {
 	} else {
 		fmt.Fprintln(v, "docker: not configured")
 	}
+	fmt.Fprintf(v, "update: %s\n", gui.updateStatusLine())
 
 	fmt.Fprintln(v, "")
 	for i, action := range gui.projectActions() {
@@ -937,12 +1187,12 @@ func (gui *Gui) updateOptionsView(v *gocui.View) {
 		return
 	}
 
-	global := "1-4/h/l/Tab:focus  j/k:move  Enter:run  o/[ ]:output tabs  Ctrl+L:clear tab  r:refresh  q:quit"
+	global := "1-4/h/l/Tab:focus  j/k:move  Enter:run  o/[ ]:output tabs  x:close tab  Ctrl+L:clear tab  r:refresh  U:update  q:quit"
 	context := ""
 
 	switch gui.currentWindow {
 	case MenuWindow:
-		context = "Project | Enter opens/executes action, s:stop server, u/D:container selector, Make Tasks for project workflows"
+		context = "Project | Enter opens/executes action, s:stop server, u/D:container selector, U:update details"
 	case ListWindow:
 		context = "Database | Enter opens selected model data"
 	case DataWindow:
@@ -951,7 +1201,7 @@ func (gui *Gui) updateOptionsView(v *gocui.View) {
 		if gui.currentModel != "" {
 			context = "Output(model) | j/k/J/K:record  n/p:page  a/e/d:CRUD  Esc:close model"
 		} else {
-			context = fmt.Sprintf("Output(%s) | command results and logs are split by tab", gui.currentOutputTabLabel())
+			context = fmt.Sprintf("Output(%s) | each command creates a new tab", gui.currentOutputTabLabel())
 		}
 	default:
 		context = ""
@@ -1077,6 +1327,9 @@ func (gui *Gui) setKeybindings() error {
 	if err := gui.g.SetKeybinding("", 's', gocui.ModNone, gui.stopServer); err != nil {
 		return err
 	}
+	if err := gui.g.SetKeybinding("", 'U', gocui.ModNone, gui.showUpdateInfo); err != nil {
+		return err
+	}
 	if err := gui.g.SetKeybinding("", 'o', gocui.ModNone, gui.toggleOutputTab); err != nil {
 		return err
 	}
@@ -1084,6 +1337,9 @@ func (gui *Gui) setKeybindings() error {
 		return err
 	}
 	if err := gui.g.SetKeybinding("", ']', gocui.ModNone, gui.nextOutputTab); err != nil {
+		return err
+	}
+	if err := gui.g.SetKeybinding("", 'x', gocui.ModNone, gui.closeCurrentOutputTab); err != nil {
 		return err
 	}
 	if err := gui.g.SetKeybinding("", gocui.KeyCtrlL, gocui.ModNone, gui.clearCurrentOutputTab); err != nil {
@@ -1144,7 +1400,11 @@ func (gui *Gui) toggleOutputTab(g *gocui.Gui, v *gocui.View) error {
 	if gui.isModalOpen || gui.currentModel != "" {
 		return nil
 	}
-	if gui.outputTab == OutputTabLogs {
+	currentID := gui.resolveOutputTabID("", false)
+	if currentID == "" {
+		return gui.switchPanel(MainWindow)
+	}
+	if gui.outputTabs[currentID].route == OutputTabLogs {
 		gui.switchOutputTab(OutputTabCommand)
 	} else {
 		gui.switchOutputTab(OutputTabLogs)
@@ -1156,11 +1416,24 @@ func (gui *Gui) nextOutputTab(g *gocui.Gui, v *gocui.View) error {
 	if gui.isModalOpen || gui.currentModel != "" {
 		return nil
 	}
-	if gui.outputTab == OutputTabCommand {
-		gui.switchOutputTab(OutputTabLogs)
-	} else {
-		gui.switchOutputTab(OutputTabCommand)
+	if len(gui.outputOrder) == 0 {
+		return gui.switchPanel(MainWindow)
 	}
+	currentID := gui.resolveOutputTabID("", false)
+	if currentID == "" {
+		gui.outputTab = gui.outputOrder[0]
+		gui.refreshOutputView()
+		return gui.switchPanel(MainWindow)
+	}
+	idx := gui.outputTabPosition(currentID)
+	if idx < 0 {
+		gui.outputTab = gui.outputOrder[0]
+		gui.refreshOutputView()
+		return gui.switchPanel(MainWindow)
+	}
+	nextIdx := (idx + 1) % len(gui.outputOrder)
+	gui.outputTab = gui.outputOrder[nextIdx]
+	gui.refreshOutputView()
 	return gui.switchPanel(MainWindow)
 }
 
@@ -1168,11 +1441,27 @@ func (gui *Gui) prevOutputTab(g *gocui.Gui, v *gocui.View) error {
 	if gui.isModalOpen || gui.currentModel != "" {
 		return nil
 	}
-	if gui.outputTab == OutputTabLogs {
-		gui.switchOutputTab(OutputTabCommand)
-	} else {
-		gui.switchOutputTab(OutputTabLogs)
+	if len(gui.outputOrder) == 0 {
+		return gui.switchPanel(MainWindow)
 	}
+	currentID := gui.resolveOutputTabID("", false)
+	if currentID == "" {
+		gui.outputTab = gui.outputOrder[len(gui.outputOrder)-1]
+		gui.refreshOutputView()
+		return gui.switchPanel(MainWindow)
+	}
+	idx := gui.outputTabPosition(currentID)
+	if idx < 0 {
+		gui.outputTab = gui.outputOrder[len(gui.outputOrder)-1]
+		gui.refreshOutputView()
+		return gui.switchPanel(MainWindow)
+	}
+	prevIdx := idx - 1
+	if prevIdx < 0 {
+		prevIdx = len(gui.outputOrder) - 1
+	}
+	gui.outputTab = gui.outputOrder[prevIdx]
+	gui.refreshOutputView()
 	return gui.switchPanel(MainWindow)
 }
 
@@ -1180,9 +1469,64 @@ func (gui *Gui) clearCurrentOutputTab(g *gocui.Gui, v *gocui.View) error {
 	if gui.isModalOpen || gui.currentModel != "" {
 		return nil
 	}
-	gui.setOutputTextForTab(gui.outputTab, "")
+	tabID := gui.resolveOutputTabID("", false)
+	if tabID == "" {
+		return nil
+	}
+	gui.setOutputTextForTab(tabID, "")
 	gui.refreshOutputView()
 	return nil
+}
+
+func (gui *Gui) closeCurrentOutputTab(g *gocui.Gui, v *gocui.View) error {
+	if gui.isModalOpen || gui.currentModel != "" {
+		return nil
+	}
+
+	tabID := gui.resolveOutputTabID("", false)
+	if tabID == "" {
+		return nil
+	}
+
+	idx := gui.outputTabPosition(tabID)
+	if idx < 0 {
+		return nil
+	}
+
+	delete(gui.outputTabs, tabID)
+	gui.outputOrder = append(gui.outputOrder[:idx], gui.outputOrder[idx+1:]...)
+
+	for route, mapped := range gui.outputRoutes {
+		if mapped != tabID {
+			continue
+		}
+		if latest := gui.latestOutputTabForRoute(route); latest != "" {
+			gui.outputRoutes[route] = latest
+		} else {
+			delete(gui.outputRoutes, route)
+		}
+	}
+
+	if len(gui.outputOrder) == 0 {
+		gui.outputTab = ""
+		gui.refreshOutputView()
+		return nil
+	}
+
+	if idx >= len(gui.outputOrder) {
+		idx = len(gui.outputOrder) - 1
+	}
+	gui.outputTab = gui.outputOrder[idx]
+	gui.refreshOutputView()
+	return nil
+}
+
+func (gui *Gui) showUpdateInfo(g *gocui.Gui, v *gocui.View) error {
+	if gui.isModalOpen || gui.currentModel != "" {
+		return nil
+	}
+	gui.showUpdatePromptInOutput()
+	return gui.switchPanel(MainWindow)
 }
 
 func (gui *Gui) cursorDown(g *gocui.Gui, v *gocui.View) error {
@@ -1329,18 +1673,17 @@ func (gui *Gui) runProjectAction(action projectAction) error {
 }
 
 func (gui *Gui) runManageCommand(title string, args ...string) error {
-	gui.resetOutput(OutputTabCommand, title)
-	gui.appendOutput(OutputTabCommand, fmt.Sprintf("$ python manage.py %s\n\n", strings.Join(args, " ")))
-	gui.switchOutputTab(OutputTabCommand)
+	tabID := gui.startCommandOutputTab(title)
+	gui.appendOutput(tabID, fmt.Sprintf("$ python manage.py %s\n\n", strings.Join(args, " ")))
 	_ = gui.switchPanel(MainWindow)
 
 	go func() {
 		output, runErr := gui.project.RunCommand(args...)
 		gui.g.Update(func(g *gocui.Gui) error {
 			if runErr != nil {
-				gui.appendOutput(OutputTabCommand, fmt.Sprintf("Error: %v\n\n", runErr))
+				gui.appendOutput(tabID, fmt.Sprintf("Error: %v\n\n", runErr))
 			}
-			gui.appendOutput(OutputTabCommand, output)
+			gui.appendOutput(tabID, output)
 			gui.refreshOutputView()
 
 			if len(args) > 0 && (args[0] == "makemigrations" || args[0] == "migrate") {
@@ -1366,26 +1709,25 @@ func isLongRunningMakeTarget(target string) bool {
 }
 
 func (gui *Gui) runStreamingCommandToLogs(title string, cmd *exec.Cmd, trackAsServer bool) error {
-	gui.resetOutput(OutputTabLogs, title)
-	gui.appendOutput(OutputTabLogs, fmt.Sprintf("$ %s\n\n", strings.Join(cmd.Args, " ")))
-	gui.switchOutputTab(OutputTabLogs)
+	tabID := gui.startLogsOutputTab(title)
+	gui.appendOutput(tabID, fmt.Sprintf("$ %s\n\n", strings.Join(cmd.Args, " ")))
 	_ = gui.switchPanel(MainWindow)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		gui.appendOutput(OutputTabLogs, fmt.Sprintf("Failed to open stdout: %v\n", err))
+		gui.appendOutput(tabID, fmt.Sprintf("Failed to open stdout: %v\n", err))
 		gui.refreshOutputView()
 		return nil
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		gui.appendOutput(OutputTabLogs, fmt.Sprintf("Failed to open stderr: %v\n", err))
+		gui.appendOutput(tabID, fmt.Sprintf("Failed to open stderr: %v\n", err))
 		gui.refreshOutputView()
 		return nil
 	}
 
 	if err := cmd.Start(); err != nil {
-		gui.appendOutput(OutputTabLogs, fmt.Sprintf("Failed to start command: %v\n", err))
+		gui.appendOutput(tabID, fmt.Sprintf("Failed to start command: %v\n", err))
 		gui.refreshOutputView()
 		return nil
 	}
@@ -1423,7 +1765,7 @@ func (gui *Gui) runStreamingCommandToLogs(title string, cmd *exec.Cmd, trackAsSe
 			captured.WriteString(line)
 			lineCopy := line
 			gui.g.Update(func(g *gocui.Gui) error {
-				gui.appendOutput(OutputTabLogs, lineCopy)
+				gui.appendOutput(tabID, lineCopy)
 				gui.refreshOutputView()
 				return nil
 			})
@@ -1432,12 +1774,12 @@ func (gui *Gui) runStreamingCommandToLogs(title string, cmd *exec.Cmd, trackAsSe
 		waitErr := cmd.Wait()
 		gui.g.Update(func(g *gocui.Gui) error {
 			if waitErr != nil {
-				gui.appendOutput(OutputTabLogs, fmt.Sprintf("\nProcess exited with error: %v\n", waitErr))
+				gui.appendOutput(tabID, fmt.Sprintf("\nProcess exited with error: %v\n", waitErr))
 			} else {
-				gui.appendOutput(OutputTabLogs, "\nProcess exited.\n")
+				gui.appendOutput(tabID, "\nProcess exited.\n")
 			}
 			if waitErr != nil && strings.Contains(strings.ToLower(captured.String()), "is not running") {
-				gui.appendOutput(OutputTabLogs, "Hint: start the required services first (Project -> Containers..., or press 'u').\n")
+				gui.appendOutput(tabID, "Hint: start the required services first (Project -> Containers..., or press 'u').\n")
 			}
 
 			if trackAsServer {
@@ -1466,9 +1808,8 @@ func (gui *Gui) runMakeTarget(title, target string) error {
 		return gui.runStreamingCommandToLogs(title, cmd, false)
 	}
 
-	gui.resetOutput(OutputTabCommand, title)
-	gui.appendOutput(OutputTabCommand, fmt.Sprintf("$ make %s\n\n", target))
-	gui.switchOutputTab(OutputTabCommand)
+	tabID := gui.startCommandOutputTab(title)
+	gui.appendOutput(tabID, fmt.Sprintf("$ make %s\n\n", target))
 	_ = gui.switchPanel(MainWindow)
 
 	go func() {
@@ -1476,9 +1817,9 @@ func (gui *Gui) runMakeTarget(title, target string) error {
 
 		gui.g.Update(func(g *gocui.Gui) error {
 			if runErr != nil {
-				gui.appendOutput(OutputTabCommand, fmt.Sprintf("Error: %v\n\n", runErr))
+				gui.appendOutput(tabID, fmt.Sprintf("Error: %v\n\n", runErr))
 			}
-			gui.appendOutput(OutputTabCommand, string(output))
+			gui.appendOutput(tabID, string(output))
 			gui.refreshOutputView()
 
 			switch target {
@@ -1589,17 +1930,16 @@ func (gui *Gui) handleDeleteKey(g *gocui.Gui, v *gocui.View) error {
 }
 
 func (gui *Gui) showURLPatterns() error {
-	gui.resetOutput(OutputTabCommand, "URL Patterns")
-	gui.appendOutput(OutputTabCommand, "Loading URL patterns...\n")
-	gui.switchOutputTab(OutputTabCommand)
+	tabID := gui.startCommandOutputTab("URL Patterns")
+	gui.appendOutput(tabID, "Loading URL patterns...\n")
 	_ = gui.switchPanel(MainWindow)
 
 	go func() {
 		patterns, runErr := gui.project.GetURLPatterns()
 		gui.g.Update(func(g *gocui.Gui) error {
-			gui.resetOutput(OutputTabCommand, "URL Patterns")
+			gui.resetOutput(tabID, "URL Patterns")
 			if runErr != nil {
-				gui.appendOutput(OutputTabCommand, fmt.Sprintf("Error: %v\n", runErr))
+				gui.appendOutput(tabID, fmt.Sprintf("Error: %v\n", runErr))
 				gui.refreshOutputView()
 				return nil
 			}
@@ -1608,7 +1948,7 @@ func (gui *Gui) showURLPatterns() error {
 				if pattern == "" {
 					continue
 				}
-				gui.appendOutput(OutputTabCommand, pattern+"\n")
+				gui.appendOutput(tabID, pattern+"\n")
 			}
 			gui.refreshOutputView()
 			return nil
@@ -1620,18 +1960,16 @@ func (gui *Gui) showURLPatterns() error {
 
 func (gui *Gui) showDependencyDoctor() error {
 	report := django.BuildDependencyReport(gui.project)
-	gui.resetOutput(OutputTabCommand, "Dependency Doctor")
-	gui.appendOutput(OutputTabCommand, report.String())
-	gui.switchOutputTab(OutputTabCommand)
+	tabID := gui.startCommandOutputTab("Dependency Doctor")
+	gui.appendOutput(tabID, report.String())
 	gui.refreshOutputView()
 	_ = gui.switchPanel(MainWindow)
 	return nil
 }
 
 func (gui *Gui) createSnapshot(g *gocui.Gui, v *gocui.View) error {
-	gui.resetOutput(OutputTabCommand, "Create Snapshot")
-	gui.appendOutput(OutputTabCommand, "Creating snapshot...\n")
-	gui.switchOutputTab(OutputTabCommand)
+	tabID := gui.startCommandOutputTab("Create Snapshot")
+	gui.appendOutput(tabID, "Creating snapshot...\n")
 	gui.refreshOutputView()
 	_ = gui.switchPanel(MainWindow)
 
@@ -1639,17 +1977,17 @@ func (gui *Gui) createSnapshot(g *gocui.Gui, v *gocui.View) error {
 		sm := django.NewSnapshotManager(gui.project)
 		snapshot, createErr := sm.CreateSnapshot("")
 		gui.g.Update(func(g *gocui.Gui) error {
-			gui.resetOutput(OutputTabCommand, "Create Snapshot")
+			gui.resetOutput(tabID, "Create Snapshot")
 			if createErr != nil {
-				gui.appendOutput(OutputTabCommand, fmt.Sprintf("Error: %v\n", createErr))
+				gui.appendOutput(tabID, fmt.Sprintf("Error: %v\n", createErr))
 			} else {
-				gui.appendOutput(OutputTabCommand, fmt.Sprintf("Snapshot created: %s\n", snapshot.Name))
-				gui.appendOutput(OutputTabCommand, fmt.Sprintf("Created: %s\n", snapshot.Timestamp.Local().Format("2006-01-02 15:04:05")))
+				gui.appendOutput(tabID, fmt.Sprintf("Snapshot created: %s\n", snapshot.Name))
+				gui.appendOutput(tabID, fmt.Sprintf("Created: %s\n", snapshot.Timestamp.Local().Format("2006-01-02 15:04:05")))
 				if snapshot.GitBranch != "" {
 					if snapshot.GitCommit != "" {
-						gui.appendOutput(OutputTabCommand, fmt.Sprintf("Git: %s (%s)\n", snapshot.GitBranch, shortCommit(snapshot.GitCommit)))
+						gui.appendOutput(tabID, fmt.Sprintf("Git: %s (%s)\n", snapshot.GitBranch, shortCommit(snapshot.GitCommit)))
 					} else {
-						gui.appendOutput(OutputTabCommand, fmt.Sprintf("Git: %s\n", snapshot.GitBranch))
+						gui.appendOutput(tabID, fmt.Sprintf("Git: %s\n", snapshot.GitBranch))
 					}
 				}
 			}
@@ -1668,31 +2006,30 @@ func (gui *Gui) createSnapshot(g *gocui.Gui, v *gocui.View) error {
 
 func (gui *Gui) listSnapshots() error {
 	snapshots, listErr := gui.loadSnapshots(true)
-	gui.resetOutput(OutputTabCommand, "Snapshots")
-	gui.switchOutputTab(OutputTabCommand)
+	tabID := gui.startCommandOutputTab("Snapshots")
 
 	if listErr != nil {
-		gui.appendOutput(OutputTabCommand, fmt.Sprintf("Error: %v\n", listErr))
+		gui.appendOutput(tabID, fmt.Sprintf("Error: %v\n", listErr))
 		gui.refreshOutputView()
 		_ = gui.switchPanel(MainWindow)
 		return nil
 	}
 
 	if len(snapshots) == 0 {
-		gui.appendOutput(OutputTabCommand, "No snapshots available.\n")
+		gui.appendOutput(tabID, "No snapshots available.\n")
 		gui.refreshOutputView()
 		_ = gui.switchPanel(MainWindow)
 		return nil
 	}
 
 	for i, snapshot := range snapshots {
-		gui.appendOutput(OutputTabCommand, fmt.Sprintf("%2d. %s\n", i+1, snapshot.Name))
-		gui.appendOutput(OutputTabCommand, fmt.Sprintf("    %s\n", snapshot.Timestamp.Local().Format("2006-01-02 15:04:05")))
+		gui.appendOutput(tabID, fmt.Sprintf("%2d. %s\n", i+1, snapshot.Name))
+		gui.appendOutput(tabID, fmt.Sprintf("    %s\n", snapshot.Timestamp.Local().Format("2006-01-02 15:04:05")))
 		if snapshot.GitBranch != "" {
 			if snapshot.GitCommit != "" {
-				gui.appendOutput(OutputTabCommand, fmt.Sprintf("    %s (%s)\n", snapshot.GitBranch, shortCommit(snapshot.GitCommit)))
+				gui.appendOutput(tabID, fmt.Sprintf("    %s (%s)\n", snapshot.GitBranch, shortCommit(snapshot.GitCommit)))
 			} else {
-				gui.appendOutput(OutputTabCommand, fmt.Sprintf("    %s\n", snapshot.GitBranch))
+				gui.appendOutput(tabID, fmt.Sprintf("    %s\n", snapshot.GitBranch))
 			}
 		}
 	}
@@ -1935,38 +2272,51 @@ func (gui *Gui) runContainerSelectionAction() error {
 		title = "Stop Containers"
 		command = "stop"
 	}
-	gui.resetOutput(OutputTabCommand, title)
-	gui.appendOutput(OutputTabCommand, fmt.Sprintf("Running docker compose %s for: %s\n\n", command, strings.Join(selected, ", ")))
-	gui.switchOutputTab(OutputTabCommand)
+	tabID := gui.startCommandOutputTab(title)
+	gui.appendOutput(tabID, fmt.Sprintf("Running docker compose %s for: %s\n\n", command, strings.Join(selected, ", ")))
 	gui.refreshOutputView()
 	_ = gui.switchPanel(MainWindow)
 
 	baseArgs := []string{"compose", "-f", gui.project.DockerComposeFile}
-	var hadError bool
+	args := append([]string{}, baseArgs...)
+	if action == "stop" {
+		args = append(args, "stop")
+	} else {
+		args = append(args, "up", "-d")
+	}
+	args = append(args, selected...)
 
-	for _, service := range selected {
-		args := append([]string{}, baseArgs...)
-		if action == "stop" {
-			args = append(args, "stop", service)
-		} else {
-			args = append(args, "up", "-d", service)
-		}
+	output, runErr := gui.runDockerComposeCommand(tabID, args)
+	hadError := runErr != nil
+	if runErr != nil && action == "start" {
+		conflicts := parseContainerNameConflicts(output)
+		if len(conflicts) > 0 {
+			gui.appendOutput(tabID, fmt.Sprintf("\nDetected existing containers with conflicting names: %s\n", strings.Join(conflicts, ", ")))
+			gui.appendOutput(tabID, "Attempting to start the existing containers directly...\n")
 
-		cmd := exec.Command("docker", args...)
-		cmd.Dir = gui.project.RootDir
-		output, runErr := cmd.CombinedOutput()
-		gui.appendOutput(OutputTabCommand, fmt.Sprintf("$ docker %s\n", strings.Join(args, " ")))
-		if len(output) > 0 {
-			gui.appendOutput(OutputTabCommand, string(output))
-			if !strings.HasSuffix(string(output), "\n") {
-				gui.appendOutput(OutputTabCommand, "\n")
+			startFailed := false
+			for _, containerName := range conflicts {
+				name := strings.TrimPrefix(containerName, "/")
+				startArgs := []string{"start", name}
+				_, startErr := gui.runDockerCommand(tabID, startArgs)
+				if startErr != nil {
+					startFailed = true
+					gui.appendOutput(tabID, fmt.Sprintf("Failed to start existing container %s: %v\n", name, startErr))
+				} else {
+					gui.appendOutput(tabID, fmt.Sprintf("Started existing container: %s\n", name))
+				}
 			}
-		}
-		if runErr != nil {
-			hadError = true
-			gui.appendOutput(OutputTabCommand, fmt.Sprintf("Error for %s: %v\n\n", service, runErr))
-		} else {
-			gui.appendOutput(OutputTabCommand, fmt.Sprintf("OK: %s\n\n", service))
+
+			if !startFailed {
+				gui.appendOutput(tabID, "\nRetrying docker compose up after starting existing containers...\n")
+				_, retryErr := gui.runDockerComposeCommand(tabID, args)
+				if retryErr != nil {
+					hadError = true
+					gui.appendOutput(tabID, fmt.Sprintf("Retry failed: %v\n", retryErr))
+				} else {
+					hadError = false
+				}
+			}
 		}
 	}
 
@@ -1976,13 +2326,63 @@ func (gui *Gui) runContainerSelectionAction() error {
 	}
 
 	if hadError {
-		gui.appendOutput(OutputTabCommand, "Completed with errors. Check output above.\n")
+		gui.appendOutput(tabID, "Completed with errors. Check output above.\n")
 	} else {
-		gui.appendOutput(OutputTabCommand, "Completed successfully.\n")
+		gui.appendOutput(tabID, "Completed successfully.\n")
 	}
 	gui.refreshOutputView()
 
 	return nil
+}
+
+func (gui *Gui) runDockerComposeCommand(tabID string, args []string) (string, error) {
+	// args should already include: compose -f <file> ...
+	gui.appendOutput(tabID, fmt.Sprintf("$ docker %s\n", strings.Join(args, " ")))
+	return gui.runDockerCommand(tabID, args)
+}
+
+func (gui *Gui) runDockerCommand(tabID string, args []string) (string, error) {
+	cmd := exec.Command("docker", args...)
+	cmd.Dir = gui.project.RootDir
+	output, err := cmd.CombinedOutput()
+	text := string(output)
+	if strings.TrimSpace(text) != "" {
+		gui.appendOutput(tabID, text)
+		if !strings.HasSuffix(text, "\n") {
+			gui.appendOutput(tabID, "\n")
+		}
+	}
+	if err != nil {
+		gui.appendOutput(tabID, fmt.Sprintf("Error: %v\n", err))
+	}
+	gui.appendOutput(tabID, "\n")
+	return text, err
+}
+
+func parseContainerNameConflicts(output string) []string {
+	re := regexp.MustCompile(`container name "([^"]+)" is already in use`)
+	matches := re.FindAllStringSubmatch(output, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(matches))
+	names := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		name := strings.TrimSpace(match[1])
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func resolvePythonBinary() string {
@@ -1997,9 +2397,8 @@ func resolvePythonBinary() string {
 
 func (gui *Gui) startServer(g *gocui.Gui, v *gocui.View) error {
 	if gui.serverCmd != nil && gui.serverCmd.Process != nil {
-		gui.resetOutput(OutputTabLogs, "Dev Server")
-		gui.appendOutput(OutputTabLogs, "Server is already running.\n")
-		gui.switchOutputTab(OutputTabLogs)
+		tabID := gui.startLogsOutputTab("Dev Server")
+		gui.appendOutput(tabID, "Server is already running.\n")
 		gui.refreshOutputView()
 		_ = gui.switchPanel(MainWindow)
 		return nil
@@ -2023,20 +2422,19 @@ func (gui *Gui) startServer(g *gocui.Gui, v *gocui.View) error {
 }
 
 func (gui *Gui) stopServer(g *gocui.Gui, v *gocui.View) error {
-	gui.switchOutputTab(OutputTabLogs)
-	gui.setOutputTitleForTab(OutputTabLogs, "Dev Server")
+	tabID := gui.startLogsOutputTab("Dev Server")
 
 	if gui.serverCmd == nil || gui.serverCmd.Process == nil {
-		gui.appendOutput(OutputTabLogs, "\nNo running server process.\n")
+		gui.appendOutput(tabID, "\nNo running server process.\n")
 		gui.refreshOutputView()
 		_ = gui.switchPanel(MainWindow)
 		return nil
 	}
 
 	if err := gui.serverCmd.Process.Kill(); err != nil {
-		gui.appendOutput(OutputTabLogs, fmt.Sprintf("\nFailed to stop server: %v\n", err))
+		gui.appendOutput(tabID, fmt.Sprintf("\nFailed to stop server: %v\n", err))
 	} else {
-		gui.appendOutput(OutputTabLogs, "\nServer stop signal sent.\n")
+		gui.appendOutput(tabID, "\nServer stop signal sent.\n")
 	}
 	gui.refreshOutputView()
 	_ = gui.switchPanel(MainWindow)
@@ -2044,9 +2442,8 @@ func (gui *Gui) stopServer(g *gocui.Gui, v *gocui.View) error {
 }
 
 func (gui *Gui) refresh(g *gocui.Gui, v *gocui.View) error {
-	gui.resetOutput(OutputTabCommand, "Refresh")
-	gui.appendOutput(OutputTabCommand, "Refreshing project metadata...\n")
-	gui.switchOutputTab(OutputTabCommand)
+	tabID := gui.startCommandOutputTab("Refresh")
+	gui.appendOutput(tabID, "Refreshing project metadata...\n")
 	gui.refreshOutputView()
 
 	gui.project.Migrations = nil
@@ -2078,7 +2475,7 @@ func (gui *Gui) refresh(g *gocui.Gui, v *gocui.View) error {
 		}
 	}
 
-	gui.appendOutput(OutputTabCommand, "Done.\n")
+	gui.appendOutput(tabID, "Done.\n")
 	gui.refreshOutputView()
 
 	return nil
@@ -2152,18 +2549,17 @@ func (gui *Gui) quit(g *gocui.Gui, v *gocui.View) error {
 
 // viewAllModels displays all discovered models in the output panel.
 func (gui *Gui) viewAllModels(g *gocui.Gui, v *gocui.View) error {
-	gui.resetOutput(OutputTabCommand, "All Models")
-	gui.switchOutputTab(OutputTabCommand)
+	tabID := gui.startCommandOutputTab("All Models")
 
 	models := gui.sortedModels()
 	if len(models) == 0 {
-		gui.appendOutput(OutputTabCommand, "No models found.\n")
+		gui.appendOutput(tabID, "No models found.\n")
 		gui.refreshOutputView()
 		return nil
 	}
 
 	for _, model := range models {
-		gui.appendOutput(OutputTabCommand, fmt.Sprintf("%s.%s (%d fields)\n", model.App, model.Name, model.Fields))
+		gui.appendOutput(tabID, fmt.Sprintf("%s.%s (%d fields)\n", model.App, model.Name, model.Fields))
 	}
 	gui.refreshOutputView()
 
@@ -2177,11 +2573,17 @@ func shortCommit(commit string) string {
 	return commit[:7]
 }
 
-// Run launches the GUI for a discovered project.
+// Run launches the GUI for a discovered project using default build metadata.
 func Run(project *django.Project) error {
+	return RunWithVersion(project, "dev")
+}
+
+// RunWithVersion launches the GUI with explicit app version metadata.
+func RunWithVersion(project *django.Project, appVersion string) error {
 	gui, err := NewGui(project)
 	if err != nil {
 		log.Panicln(err)
 	}
+	gui.setAppVersion(appVersion)
 	return gui.Run()
 }

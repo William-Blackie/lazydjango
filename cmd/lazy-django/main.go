@@ -153,7 +153,7 @@ func main() {
 	}
 
 	// Run GUI
-	if err := gui.Run(project); err != nil {
+	if err := gui.RunWithVersion(project, version); err != nil {
 		fmt.Fprintf(os.Stderr, "GUI Error: %v\n", err)
 		log.Fatal(err)
 	}

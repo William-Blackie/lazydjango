@@ -807,10 +807,9 @@ func (gui *Gui) submitModal() error {
 
 		snapshot := gui.restoreSnapshots[gui.restoreIndex]
 		gui.closeModal()
-		gui.resetOutput(OutputTabCommand, "Restore Snapshot")
-		gui.appendOutput(OutputTabCommand, fmt.Sprintf("Restoring snapshot: %s\n", snapshot.Name))
-		gui.appendOutput(OutputTabCommand, "Please wait...\n")
-		gui.switchOutputTab(OutputTabCommand)
+		tabID := gui.startCommandOutputTab("Restore Snapshot")
+		gui.appendOutput(tabID, fmt.Sprintf("Restoring snapshot: %s\n", snapshot.Name))
+		gui.appendOutput(tabID, "Please wait...\n")
 		gui.refreshOutputView()
 		_ = gui.switchPanel(MainWindow)
 
@@ -818,11 +817,11 @@ func (gui *Gui) submitModal() error {
 			sm := django.NewSnapshotManager(gui.project)
 			err := sm.RestoreSnapshot(snapshot.ID)
 			gui.g.Update(func(g *gocui.Gui) error {
-				gui.resetOutput(OutputTabCommand, "Restore Snapshot")
+				gui.resetOutput(tabID, "Restore Snapshot")
 				if err != nil {
-					gui.appendOutput(OutputTabCommand, fmt.Sprintf("Restore failed: %v\n", err))
+					gui.appendOutput(tabID, fmt.Sprintf("Restore failed: %v\n", err))
 				} else {
-					gui.appendOutput(OutputTabCommand, fmt.Sprintf("Snapshot restored successfully: %s\n", snapshot.Name))
+					gui.appendOutput(tabID, fmt.Sprintf("Snapshot restored successfully: %s\n", snapshot.Name))
 					gui.project.DiscoverMigrations()
 					if dataView, err := gui.g.View(DataWindow); err == nil {
 						gui.renderDataList(dataView)

@@ -13,6 +13,7 @@ It gives you one place to inspect project state, run common commands, browse mod
 - CRUD modals for add/edit/delete on model records
 - Snapshot create/list/restore plumbing for SQLite/PostgreSQL/MySQL
 - Dependency doctor (`--doctor`) for runtime tool preflight checks
+- Startup update check against latest GitHub release (cached; non-blocking)
 - Settings/model/migration discovery with runtime introspection and file-based fallback
 
 ## Project Status
@@ -80,8 +81,9 @@ Machine-readable output:
 - `Database` panel: discovered tables/models
 - `Data` panel: snapshot status + snapshot actions
 - `Output` panel:
-  - `Command` tab for one-off command output
-  - `Logs` tab for long-running process output (dev server, long-running make/docker flows)
+  - each command/log run opens a new output tab
+  - command tabs for one-off output
+  - logs tabs for long-running process output (dev server, long-running make/docker flows)
   - model record tables when a model is opened from `Database`
 - Bottom bar: context-sensitive key help
 - Active panel and selected rows are shown with a `>` cursor marker
@@ -97,20 +99,19 @@ Machine-readable output:
 - `Enter`: execute/open selected item in focused panel
 - `q`: quit
 - `Ctrl+C`: quit
-- `o`: toggle Output tab (`Command`/`Logs`) when in Output panel
-- `[` / `]`: previous/next Output tab
-- `Ctrl+L`: clear current Output tab
 - `r`: refresh project metadata
+- `U`: open update status/upgrade instructions
 
 ### Project Panel
 
 - `Enter` on action: execute or open a focused action menu
 - Top level is intentionally short: `Run dev server`, `Stop dev server`, `Containers...`, `Migrations...`, `Tools...`
-- If a `Makefile` is present, LazyDjango adds `Make Tasks...` and routes key workflows through available make targets
+- If a `Makefile` is present, LazyDjango adds `Make Tasks...` with curated project-specific targets
 - `Migrations...` and `Tools...` open modal action lists to keep the panel concise
 - `s`: stop running dev server
 - `u`: open **Start Containers** selector modal
 - `D`: open **Stop Containers** selector modal
+- `U`: show update details and upgrade command
 
 ### Database Panel
 
@@ -127,11 +128,13 @@ Machine-readable output:
 
 ### Output Panel (Command/Logs)
 
-- `o`: toggle between `Command` and `Logs`
-- `[` / `]`: move between tabs
+- Each command creates a new output tab
+- `[` / `]`: previous/next tab
+- `o`: jump to latest tab of the other type (`Command`/`Logs`)
+- `x`: close active tab
 - `Ctrl+L`: clear active tab
-- Long-running tasks stream to `Logs` by default
-- One-off task output goes to `Command` by default
+- Long-running tasks open `Logs` tabs by default
+- One-off tasks open `Command` tabs by default
 
 ### Data Panel (Snapshots)
 

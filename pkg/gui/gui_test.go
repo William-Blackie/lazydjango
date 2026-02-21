@@ -603,23 +603,24 @@ func TestProjectMakeActions(t *testing.T) {
 		makeTargetsLoaded: true,
 		makeTargets: []makeTarget{
 			{name: "test", description: "Run tests"},
+			{name: "up", description: "Start containers"},
 			{name: "runserver", description: "Run server"},
 			{name: "migrate", description: "Run migrations"},
 		},
 	}
 
 	actions := gui.projectMakeActions()
-	if len(actions) != 3 {
-		t.Fatalf("expected 3 actions, got %d", len(actions))
+	if len(actions) != 2 {
+		t.Fatalf("expected 2 curated actions, got %d", len(actions))
 	}
-	if actions[0].makeTarget != "runserver" {
-		t.Fatalf("expected runserver first by priority, got %q", actions[0].makeTarget)
+	if actions[0].makeTarget != "up" {
+		t.Fatalf("expected up first by priority, got %q", actions[0].makeTarget)
 	}
-	if actions[1].makeTarget != "migrate" {
-		t.Fatalf("expected migrate second by priority, got %q", actions[1].makeTarget)
+	if actions[1].makeTarget != "test" {
+		t.Fatalf("expected test second by priority, got %q", actions[1].makeTarget)
 	}
-	if actions[2].makeTarget != "test" {
-		t.Fatalf("expected test third by priority, got %q", actions[2].makeTarget)
+	if actions[0].label != "up - Start containers" {
+		t.Fatalf("expected compact make label, got %q", actions[0].label)
 	}
 }
 
@@ -695,36 +696,50 @@ func TestProjectToolActionsContainExpectedCommands(t *testing.T) {
 }
 
 func TestOutputTabStateHelpers(t *testing.T) {
-	gui := &Gui{
-		outputTab:          OutputTabCommand,
-		outputCommandTitle: "Command",
-		outputLogsTitle:    "Logs",
+	gui := &Gui{}
+
+	commandTab1 := gui.startCommandOutputTab("Command 1")
+	logsTab1 := gui.startLogsOutputTab("Logs 1")
+	commandTab2 := gui.startCommandOutputTab("Command 2")
+
+	if len(gui.outputOrder) != 3 {
+		t.Fatalf("expected 3 output tabs, got %d", len(gui.outputOrder))
+	}
+	if gui.outputTab != commandTab2 {
+		t.Fatalf("expected latest tab selected, got %q", gui.outputTab)
 	}
 
-	gui.appendOutput(OutputTabCommand, "cmd-1\n")
-	gui.appendOutput(OutputTabLogs, "log-1\n")
-
-	if got := gui.outputTextForTab(OutputTabCommand); got != "cmd-1\n" {
-		t.Fatalf("expected command output to be captured, got %q", got)
+	gui.appendOutput(commandTab1, "cmd-1\n")
+	gui.appendOutput(logsTab1, "log-1\n")
+	if got := gui.outputTextForTab(commandTab1); got != "cmd-1\n" {
+		t.Fatalf("expected command output captured, got %q", got)
 	}
-	if got := gui.outputTextForTab(OutputTabLogs); got != "log-1\n" {
-		t.Fatalf("expected logs output to be captured, got %q", got)
-	}
-
-	gui.resetOutput(OutputTabCommand, "Run Check")
-	if got := gui.outputTitleForTab(OutputTabCommand); got != "Run Check" {
-		t.Fatalf("expected command title reset, got %q", got)
-	}
-	if got := gui.outputTextForTab(OutputTabCommand); got != "" {
-		t.Fatalf("expected command text reset, got %q", got)
+	if got := gui.outputTextForTab(logsTab1); got != "log-1\n" {
+		t.Fatalf("expected logs output captured, got %q", got)
 	}
 
 	gui.switchOutputTab(OutputTabLogs)
-	if gui.outputTab != OutputTabLogs {
-		t.Fatalf("expected output tab logs, got %q", gui.outputTab)
+	if gui.outputTab != logsTab1 {
+		t.Fatalf("expected switch by route to latest logs tab, got %q", gui.outputTab)
 	}
-	if got := gui.currentOutputTabLabel(); got != "Logs" {
-		t.Fatalf("expected current tab label Logs, got %q", got)
+
+	gui.resetOutput(commandTab2, "Run Check")
+	if got := gui.outputTitleForTab(commandTab2); got != "Run Check" {
+		t.Fatalf("expected title reset, got %q", got)
+	}
+	if got := gui.outputTextForTab(commandTab2); got != "" {
+		t.Fatalf("expected tab text reset, got %q", got)
+	}
+
+	gui.switchOutputTab(commandTab2)
+	if err := gui.closeCurrentOutputTab(nil, nil); err != nil {
+		t.Fatalf("closeCurrentOutputTab returned error: %v", err)
+	}
+	if len(gui.outputOrder) != 2 {
+		t.Fatalf("expected 2 tabs after close, got %d", len(gui.outputOrder))
+	}
+	if got := gui.resolveOutputTabID(OutputTabCommand, false); got != commandTab1 {
+		t.Fatalf("expected command route to fall back to prior command tab, got %q", got)
 	}
 }
 
@@ -743,5 +758,28 @@ func TestIsLongRunningMakeTarget(t *testing.T) {
 		if got := isLongRunningMakeTarget(target); got != want {
 			t.Fatalf("target %q: expected %v, got %v", target, want, got)
 		}
+	}
+}
+
+func TestParseContainerNameConflicts(t *testing.T) {
+	output := `
+Error response from daemon: Conflict. The container name "/django-app" is already in use by container "aaa".
+Error response from daemon: Conflict. The container name "/django-api" is already in use by container "bbb".
+Error response from daemon: Conflict. The container name "/django-app" is already in use by container "ccc".
+`
+
+	conflicts := parseContainerNameConflicts(output)
+	if len(conflicts) != 2 {
+		t.Fatalf("expected 2 unique conflicts, got %d (%v)", len(conflicts), conflicts)
+	}
+	if conflicts[0] != "/django-api" || conflicts[1] != "/django-app" {
+		t.Fatalf("unexpected conflict parsing result: %v", conflicts)
+	}
+}
+
+func TestParseContainerNameConflictsNone(t *testing.T) {
+	conflicts := parseContainerNameConflicts("all good")
+	if len(conflicts) != 0 {
+		t.Fatalf("expected no conflicts, got %v", conflicts)
 	}
 }
