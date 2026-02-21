@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      HOMEBREW_TAP_OWNER: ${{ vars.HOMEBREW_TAP_OWNER != '' && vars.HOMEBREW_TAP_OWNER || github.repository_owner }}
+      HOMEBREW_TAP_NAME: ${{ vars.HOMEBREW_TAP_NAME != '' && vars.HOMEBREW_TAP_NAME || github.event.repository.name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache: true
+
+      - name: Verify
+        run: ./smoke-test.sh
+
+      - name: Resolve release args
+        id: release_args
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          args="release --clean"
+          reason=""
+
+          if [[ -z "${HOMEBREW_TAP_TOKEN:-}" ]]; then
+            reason="HOMEBREW_TAP_GITHUB_TOKEN is not configured"
+          else
+            api_url="https://api.github.com/repos/${HOMEBREW_TAP_OWNER}/${HOMEBREW_TAP_NAME}"
+            status_code="$(
+              curl -sS \
+                -o /tmp/tap_repo.json \
+                -w "%{http_code}" \
+                -H "Authorization: Bearer ${HOMEBREW_TAP_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "${api_url}"
+            )"
+            if [[ "${status_code}" != "200" ]]; then
+              api_message="$(jq -r '.message // empty' /tmp/tap_repo.json 2>/dev/null || true)"
+              if [[ -n "${api_message}" ]]; then
+                reason="tap repo ${HOMEBREW_TAP_OWNER}/${HOMEBREW_TAP_NAME} unavailable (${status_code}: ${api_message})"
+              else
+                reason="tap repo ${HOMEBREW_TAP_OWNER}/${HOMEBREW_TAP_NAME} unavailable (HTTP ${status_code})"
+              fi
+            fi
+          fi
+
+          if [[ -n "${reason}" ]]; then
+            echo "::warning::Skipping Homebrew publishing: ${reason}"
+            args="${args} --skip=homebrew"
+            echo "publish_homebrew=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "publish_homebrew=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+          echo "args=${args}" >> "${GITHUB_OUTPUT}"
+
+      - name: GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: ${{ steps.release_args.outputs.args }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          HOMEBREW_TAP_OWNER: ${{ env.HOMEBREW_TAP_OWNER }}
+          HOMEBREW_TAP_NAME: ${{ env.HOMEBREW_TAP_NAME }}
