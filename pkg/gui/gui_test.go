@@ -1,0 +1,747 @@
+package gui
+
+import (
+	"testing"
+
+	"github.com/awesome-gocui/gocui"
+	"github.com/williamblackie/lazydjango/pkg/django"
+)
+
+// TestNewGui tests GUI initialization
+func TestNewGui(t *testing.T) {
+	project := &django.Project{
+		ManagePyPath: "/tmp/test-project/manage.py",
+		Database: django.DatabaseInfo{
+			IsUsable: false,
+		},
+	}
+
+	gui, err := NewGui(project)
+
+	if err != nil {
+		t.Skipf("Skipping GUI init test in non-interactive terminal: %v", err)
+	}
+
+	if gui == nil {
+		t.Fatal("NewGui returned nil")
+	}
+
+	if gui.project != project {
+		t.Error("GUI project not set correctly")
+	}
+
+	if gui.config == nil {
+		t.Error("GUI config not set")
+	}
+
+	if gui.currentWindow != MenuWindow {
+		t.Errorf("Expected currentWindow to be %s, got %s", MenuWindow, gui.currentWindow)
+	}
+
+	// Clean up
+	gui.g.Close()
+}
+
+// TestModalState tests modal state management
+func TestModalState(t *testing.T) {
+	gui := &Gui{
+		isModalOpen: false,
+		modalType:   "",
+		modalFields: []map[string]interface{}{},
+		modalValues: map[string]string{},
+	}
+
+	// Test opening form modal
+	fields := []map[string]interface{}{
+		{
+			"name":  "title",
+			"type":  "CharField",
+			"null":  false,
+			"blank": false,
+		},
+		{
+			"name":  "content",
+			"type":  "TextField",
+			"null":  true,
+			"blank": true,
+		},
+	}
+
+	gui.currentApp = "blog"
+	gui.currentModel = "Post"
+
+	gui.openFormModal("add", fields, nil)
+
+	if !gui.isModalOpen {
+		t.Error("Modal should be open")
+	}
+
+	if gui.modalType != "add" {
+		t.Errorf("Expected modalType to be 'add', got '%s'", gui.modalType)
+	}
+
+	if len(gui.modalFields) != 2 {
+		t.Errorf("Expected 2 modal fields, got %d", len(gui.modalFields))
+	}
+
+	if gui.modalFieldIdx != 0 {
+		t.Error("Expected modalFieldIdx to be 0")
+	}
+
+	if gui.modalTitle != "Add blog.Post" {
+		t.Errorf("Expected modalTitle to be 'Add blog.Post', got '%s'", gui.modalTitle)
+	}
+
+	// Test with current values
+	currentValues := map[string]string{
+		"title":   "Test Title",
+		"content": "Test Content",
+	}
+
+	gui.openFormModal("edit", fields, currentValues)
+
+	if gui.modalType != "edit" {
+		t.Errorf("Expected modalType to be 'edit', got '%s'", gui.modalType)
+	}
+
+	if gui.modalTitle != "Edit blog.Post" {
+		t.Errorf("Expected modalTitle to be 'Edit blog.Post', got '%s'", gui.modalTitle)
+	}
+
+	if gui.modalValues["title"] != "Test Title" {
+		t.Errorf("Expected title to be 'Test Title', got '%s'", gui.modalValues["title"])
+	}
+}
+
+// TestModalNavigation tests modal field navigation
+func TestModalNavigation(t *testing.T) {
+	gui := &Gui{
+		modalFieldIdx: 0,
+		modalFields: []map[string]interface{}{
+			{"name": "field1", "type": "CharField"},
+			{"name": "field2", "type": "CharField"},
+			{"name": "field3", "type": "CharField"},
+		},
+	}
+
+	// Test moving down
+	gui.modalFieldIdx = (gui.modalFieldIdx + 1) % len(gui.modalFields)
+	if gui.modalFieldIdx != 1 {
+		t.Errorf("Expected modalFieldIdx to be 1, got %d", gui.modalFieldIdx)
+	}
+
+	// Test moving up from index 1
+	gui.modalFieldIdx--
+	if gui.modalFieldIdx != 0 {
+		t.Errorf("Expected modalFieldIdx to be 0, got %d", gui.modalFieldIdx)
+	}
+
+	// Test wrapping up from 0
+	gui.modalFieldIdx--
+	if gui.modalFieldIdx < 0 {
+		gui.modalFieldIdx = len(gui.modalFields) - 1
+	}
+	if gui.modalFieldIdx != 2 {
+		t.Errorf("Expected modalFieldIdx to be 2 (wrapped), got %d", gui.modalFieldIdx)
+	}
+
+	// Test wrapping down from end
+	gui.modalFieldIdx = (gui.modalFieldIdx + 1) % len(gui.modalFields)
+	if gui.modalFieldIdx != 0 {
+		t.Errorf("Expected modalFieldIdx to be 0 (wrapped), got %d", gui.modalFieldIdx)
+	}
+}
+
+// TestGetFieldConstraints tests field constraint generation
+func TestGetFieldConstraints(t *testing.T) {
+	gui := &Gui{}
+
+	tests := []struct {
+		name        string
+		field       map[string]interface{}
+		expected    string
+		description string
+	}{
+		{
+			name: "CharField with max_length",
+			field: map[string]interface{}{
+				"name":       "title",
+				"type":       "CharField",
+				"max_length": float64(200),
+			},
+			expected:    "max length: 200",
+			description: "Should show max_length for CharField",
+		},
+		{
+			name: "Field with unique constraint",
+			field: map[string]interface{}{
+				"name":   "email",
+				"type":   "EmailField",
+				"unique": true,
+			},
+			expected:    "unique",
+			description: "Should show unique constraint",
+		},
+		{
+			name: "Field with max_length and unique",
+			field: map[string]interface{}{
+				"name":       "username",
+				"type":       "CharField",
+				"max_length": float64(150),
+				"unique":     true,
+			},
+			expected:    "max length: 150 | unique",
+			description: "Should show both constraints",
+		},
+		{
+			name: "Field with choices",
+			field: map[string]interface{}{
+				"name": "status",
+				"type": "CharField",
+				"choices": []interface{}{
+					map[string]interface{}{"value": "draft", "label": "Draft"},
+					map[string]interface{}{"value": "published", "label": "Published"},
+				},
+			},
+			expected:    "choices: Draft, Published",
+			description: "Should show choices",
+		},
+		{
+			name: "Field with no constraints",
+			field: map[string]interface{}{
+				"name": "content",
+				"type": "TextField",
+			},
+			expected:    "",
+			description: "Should return empty string for unconstrained field",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := gui.getFieldConstraints(tt.field)
+			if result != tt.expected {
+				t.Errorf("%s: expected '%s', got '%s'", tt.description, tt.expected, result)
+			}
+		})
+	}
+}
+
+// TestGetRelatedModelFromField tests ForeignKey field parsing
+func TestGetRelatedModelFromField(t *testing.T) {
+	gui := &Gui{}
+
+	tests := []struct {
+		name        string
+		field       map[string]interface{}
+		fieldName   string
+		expectModel string
+		expectApp   string
+		description string
+	}{
+		{
+			name: "ForeignKey with both app and model",
+			field: map[string]interface{}{
+				"type":          "ForeignKey",
+				"related_model": "User",
+				"related_app":   "auth",
+			},
+			fieldName:   "author",
+			expectModel: "User",
+			expectApp:   "auth",
+			description: "Should extract both app and model",
+		},
+		{
+			name: "ForeignKey with model only",
+			field: map[string]interface{}{
+				"type":          "ForeignKey",
+				"related_model": "Post",
+			},
+			fieldName:   "post",
+			expectModel: "Post",
+			expectApp:   "",
+			description: "Should work with just model",
+		},
+		{
+			name: "Non-ForeignKey field",
+			field: map[string]interface{}{
+				"type": "CharField",
+			},
+			fieldName:   "title",
+			expectModel: "",
+			expectApp:   "",
+			description: "Should return empty for non-ForeignKey",
+		},
+		{
+			name: "Field ending with _id (heuristic)",
+			field: map[string]interface{}{
+				"type": "IntegerField",
+			},
+			fieldName:   "author_id",
+			expectModel: "Author",
+			expectApp:   "",
+			description: "Should use heuristic for _id fields",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model, app := gui.getRelatedModelFromField(tt.field, tt.fieldName)
+
+			if model != tt.expectModel {
+				t.Errorf("%s: expected model='%s', got '%s'", tt.description, tt.expectModel, model)
+			}
+
+			if app != tt.expectApp {
+				t.Errorf("%s: expected app='%s', got '%s'", tt.description, tt.expectApp, app)
+			}
+		})
+	}
+}
+
+// TestGetRecordDisplayString tests record formatting for display
+func TestGetRecordDisplayString(t *testing.T) {
+	gui := &Gui{}
+
+	tests := []struct {
+		name        string
+		record      django.ModelRecord
+		expected    string
+		description string
+	}{
+		{
+			name: "Record with name field",
+			record: django.ModelRecord{
+				PK: 1,
+				Fields: map[string]interface{}{
+					"name": "John Doe",
+					"age":  float64(30),
+				},
+			},
+			expected:    "John Doe",
+			description: "Should prefer name field",
+		},
+		{
+			name: "Record with title field",
+			record: django.ModelRecord{
+				PK: 2,
+				Fields: map[string]interface{}{
+					"title":   "Test Post",
+					"content": "Content here",
+				},
+			},
+			expected:    "Test Post",
+			description: "Should use title field if no name",
+		},
+		{
+			name: "Record with username field",
+			record: django.ModelRecord{
+				PK: 3,
+				Fields: map[string]interface{}{
+					"username": "testuser",
+					"email":    "test@example.com",
+				},
+			},
+			expected:    "testuser",
+			description: "Should use username field",
+		},
+		{
+			name: "Record with email field",
+			record: django.ModelRecord{
+				PK: 4,
+				Fields: map[string]interface{}{
+					"email": "user@example.com",
+					"phone": "123-456-7890",
+				},
+			},
+			expected:    "user@example.com",
+			description: "Should use email field",
+		},
+		{
+			name: "Record with slug field",
+			record: django.ModelRecord{
+				PK: 5,
+				Fields: map[string]interface{}{
+					"slug": "test-slug",
+					"body": "Body text",
+				},
+			},
+			expected:    "test-slug",
+			description: "Should use slug field",
+		},
+		{
+			name: "Record with non-display fields (fallback to first non-id)",
+			record: django.ModelRecord{
+				PK: 6,
+				Fields: map[string]interface{}{
+					"id":          float64(6),
+					"description": "Description here",
+					"count":       float64(42),
+				},
+			},
+			expected:    "description: Description here", // Fallback shows first non-id field
+			description: "Should show first non-id field when no display fields",
+		},
+		{
+			name: "Record with only id",
+			record: django.ModelRecord{
+				PK: 7,
+				Fields: map[string]interface{}{
+					"id": float64(7),
+				},
+			},
+			expected:    "Record #7",
+			description: "Should fall back to Record #PK when only id present",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := gui.getRecordDisplayString(tt.record)
+			if result != tt.expected {
+				t.Errorf("%s: expected '%s', got '%s'", tt.description, tt.expected, result)
+			}
+		})
+	}
+}
+
+// TestUpdateOptionsView tests the options/keybindings display
+func TestUpdateOptionsView(t *testing.T) {
+	g, err := gocui.NewGui(gocui.OutputNormal, false)
+	if err != nil {
+		t.Skip("Cannot create gocui in test environment")
+	}
+	defer g.Close()
+
+	gui := &Gui{
+		g:             g,
+		currentWindow: MenuWindow,
+		isModalOpen:   false,
+	}
+
+	// This test just verifies the function doesn't crash
+	// Full UI testing would require a mock terminal
+	v, err := g.SetView("test", 0, 0, 80, 3, 0)
+	if err != nil && err != gocui.ErrUnknownView {
+		t.Fatal(err)
+	}
+
+	gui.updateOptionsView(v)
+
+	// Check that something was written
+	content := v.Buffer()
+	if len(content) == 0 {
+		t.Error("updateOptionsView should write content to view")
+	}
+}
+
+// TestPanelSwitching tests switching between different panels
+func TestPanelSwitching(t *testing.T) {
+	gui := &Gui{
+		currentWindow: MenuWindow,
+	}
+
+	// Test switching panels
+	panels := []string{MenuWindow, ListWindow, DataWindow, MainWindow}
+
+	for _, panel := range panels {
+		gui.currentWindow = panel
+		if gui.currentWindow != panel {
+			t.Errorf("Failed to switch to panel %s", panel)
+		}
+	}
+}
+
+func TestClampSelection(t *testing.T) {
+	if got := clampSelection(-1, 3); got != 0 {
+		t.Fatalf("expected lower clamp to 0, got %d", got)
+	}
+	if got := clampSelection(7, 3); got != 2 {
+		t.Fatalf("expected upper clamp to 2, got %d", got)
+	}
+	if got := clampSelection(1, 3); got != 1 {
+		t.Fatalf("expected in-range selection to remain 1, got %d", got)
+	}
+}
+
+// TestModalFieldValidation tests field validation logic
+func TestModalFieldValidation(t *testing.T) {
+	tests := []struct {
+		name  string
+		field map[string]interface{}
+		value string
+		valid bool
+	}{
+		{
+			name: "Required field with value",
+			field: map[string]interface{}{
+				"null":  false,
+				"blank": false,
+			},
+			value: "some value",
+			valid: true,
+		},
+		{
+			name: "Required field without value",
+			field: map[string]interface{}{
+				"null":  false,
+				"blank": false,
+			},
+			value: "",
+			valid: false,
+		},
+		{
+			name: "Optional field without value",
+			field: map[string]interface{}{
+				"null":  true,
+				"blank": true,
+			},
+			value: "",
+			valid: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			required := false
+			if null, ok := tt.field["null"].(bool); ok && !null {
+				if blank, ok := tt.field["blank"].(bool); ok && !blank {
+					required = true
+				}
+			}
+
+			isValid := !required || tt.value != ""
+
+			if isValid != tt.valid {
+				t.Errorf("Expected validity %v, got %v", tt.valid, isValid)
+			}
+		})
+	}
+}
+
+func TestParseComposePSOutput(t *testing.T) {
+	arrayInput := `[
+		{"Service":"web","State":"running"},
+		{"Service":"db","State":"exited"}
+	]`
+
+	arrayStatus := parseComposePSOutput(arrayInput)
+	if arrayStatus["web"] != "running" {
+		t.Fatalf("expected web=running, got %q", arrayStatus["web"])
+	}
+	if arrayStatus["db"] != "exited" {
+		t.Fatalf("expected db=exited, got %q", arrayStatus["db"])
+	}
+
+	lineInput := `{"Service":"cache","Status":"running"}`
+	lineStatus := parseComposePSOutput(lineInput)
+	if lineStatus["cache"] != "running" {
+		t.Fatalf("expected cache=running, got %q", lineStatus["cache"])
+	}
+}
+
+func TestParseComposeServicesFromYAML(t *testing.T) {
+	content := `
+version: "3.9"
+services:
+  web:
+    build: .
+  db:
+    image: postgres:16
+  cache:
+    image: redis:7
+volumes:
+  pgdata:
+`
+
+	services := parseComposeServicesFromYAML(content)
+	if len(services) != 3 {
+		t.Fatalf("expected 3 services, got %d (%v)", len(services), services)
+	}
+	if services[0] != "cache" || services[1] != "db" || services[2] != "web" {
+		t.Fatalf("unexpected services ordering/content: %v", services)
+	}
+}
+
+func TestParseComposeServicesFromYAMLNoServices(t *testing.T) {
+	content := `
+version: "3.9"
+volumes:
+  data:
+`
+	services := parseComposeServicesFromYAML(content)
+	if len(services) != 0 {
+		t.Fatalf("expected no services, got %v", services)
+	}
+}
+
+func TestParseMakeHelpOutput(t *testing.T) {
+	help := `
+Docker
+  docker               Build the Docker image
+  up                   Start main containers
+
+Django
+  runserver            Run Django development server
+  migrate              Run migrations
+`
+
+	targets := parseMakeHelpOutput(help)
+	if len(targets) != 4 {
+		t.Fatalf("expected 4 targets, got %d (%v)", len(targets), targets)
+	}
+	if targets[0].name != "docker" || targets[0].section != "Docker" {
+		t.Fatalf("unexpected first target: %+v", targets[0])
+	}
+	if targets[2].name != "runserver" || targets[2].section != "Django" {
+		t.Fatalf("unexpected third target: %+v", targets[2])
+	}
+}
+
+func TestProjectMakeActions(t *testing.T) {
+	gui := &Gui{
+		makeTargetsLoaded: true,
+		makeTargets: []makeTarget{
+			{name: "test", description: "Run tests"},
+			{name: "runserver", description: "Run server"},
+			{name: "migrate", description: "Run migrations"},
+		},
+	}
+
+	actions := gui.projectMakeActions()
+	if len(actions) != 3 {
+		t.Fatalf("expected 3 actions, got %d", len(actions))
+	}
+	if actions[0].makeTarget != "runserver" {
+		t.Fatalf("expected runserver first by priority, got %q", actions[0].makeTarget)
+	}
+	if actions[1].makeTarget != "migrate" {
+		t.Fatalf("expected migrate second by priority, got %q", actions[1].makeTarget)
+	}
+	if actions[2].makeTarget != "test" {
+		t.Fatalf("expected test third by priority, got %q", actions[2].makeTarget)
+	}
+}
+
+func TestShortCommit(t *testing.T) {
+	if got := shortCommit("abcdef123456"); got != "abcdef1" {
+		t.Fatalf("expected truncated commit, got %q", got)
+	}
+	if got := shortCommit("abc123"); got != "abc123" {
+		t.Fatalf("expected unchanged short commit, got %q", got)
+	}
+}
+
+func TestProjectActionsContainCoreItems(t *testing.T) {
+	gui := &Gui{
+		project: &django.Project{},
+	}
+
+	foundRun := false
+	foundStop := false
+	foundMigrations := false
+	foundTools := false
+	for _, action := range gui.projectActions() {
+		if action.label == "Run dev server" {
+			foundRun = true
+		}
+		if action.label == "Stop dev server" {
+			foundStop = true
+		}
+		if action.label == "Migrations..." {
+			foundMigrations = true
+		}
+		if action.label == "Tools..." {
+			foundTools = true
+		}
+	}
+
+	if !foundRun {
+		t.Fatal("expected project actions to include Run dev server")
+	}
+	if !foundStop {
+		t.Fatal("expected project actions to include Stop dev server")
+	}
+	if !foundMigrations {
+		t.Fatal("expected project actions to include Migrations...")
+	}
+	if !foundTools {
+		t.Fatal("expected project actions to include Tools...")
+	}
+}
+
+func TestProjectToolActionsContainExpectedCommands(t *testing.T) {
+	gui := &Gui{
+		project: &django.Project{},
+	}
+
+	foundCheck := false
+	foundURLs := false
+	for _, action := range gui.projectToolActions() {
+		if action.label == "Django check" {
+			foundCheck = true
+		}
+		if action.label == "Show URL patterns" {
+			foundURLs = true
+		}
+	}
+
+	if !foundCheck {
+		t.Fatal("expected tool actions to include Django check")
+	}
+	if !foundURLs {
+		t.Fatal("expected tool actions to include Show URL patterns")
+	}
+}
+
+func TestOutputTabStateHelpers(t *testing.T) {
+	gui := &Gui{
+		outputTab:          OutputTabCommand,
+		outputCommandTitle: "Command",
+		outputLogsTitle:    "Logs",
+	}
+
+	gui.appendOutput(OutputTabCommand, "cmd-1\n")
+	gui.appendOutput(OutputTabLogs, "log-1\n")
+
+	if got := gui.outputTextForTab(OutputTabCommand); got != "cmd-1\n" {
+		t.Fatalf("expected command output to be captured, got %q", got)
+	}
+	if got := gui.outputTextForTab(OutputTabLogs); got != "log-1\n" {
+		t.Fatalf("expected logs output to be captured, got %q", got)
+	}
+
+	gui.resetOutput(OutputTabCommand, "Run Check")
+	if got := gui.outputTitleForTab(OutputTabCommand); got != "Run Check" {
+		t.Fatalf("expected command title reset, got %q", got)
+	}
+	if got := gui.outputTextForTab(OutputTabCommand); got != "" {
+		t.Fatalf("expected command text reset, got %q", got)
+	}
+
+	gui.switchOutputTab(OutputTabLogs)
+	if gui.outputTab != OutputTabLogs {
+		t.Fatalf("expected output tab logs, got %q", gui.outputTab)
+	}
+	if got := gui.currentOutputTabLabel(); got != "Logs" {
+		t.Fatalf("expected current tab label Logs, got %q", got)
+	}
+}
+
+func TestIsLongRunningMakeTarget(t *testing.T) {
+	cases := map[string]bool{
+		"up":        true,
+		"up-all":    true,
+		"runserver": true,
+		"watch":     true,
+		"storybook": true,
+		"test":      false,
+		"migrate":   false,
+	}
+
+	for target, want := range cases {
+		if got := isLongRunningMakeTarget(target); got != want {
+			t.Fatalf("target %q: expected %v, got %v", target, want, got)
+		}
+	}
+}

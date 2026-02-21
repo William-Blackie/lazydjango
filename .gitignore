@@ -1,0 +1,32 @@
+# Binaries
+/lazy-django
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+
+# Local build/test cache
+.cache/
+.gocache/
+
+# GoReleaser artifacts
+dist/
