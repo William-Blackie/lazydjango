@@ -26,12 +26,18 @@ func (gui *Gui) loadAndDisplayRecords() error {
 	if err != nil {
 		mainView.Clear()
 		fmt.Fprintf(mainView, "Error loading data: %v\n", err)
+		gui.rememberError("model-query", err.Error())
 		return nil
 	}
 
 	gui.currentRecords = result.Records
 	gui.totalRecords = result.Total
 	gui.selectedRecordIdx = clampSelection(gui.selectedRecordIdx, len(result.Records))
+	var selectedPK interface{}
+	if len(gui.currentRecords) > 0 && gui.selectedRecordIdx >= 0 && gui.selectedRecordIdx < len(gui.currentRecords) {
+		selectedPK = gui.currentRecords[gui.selectedRecordIdx].PK
+	}
+	gui.rememberModelAccess(gui.currentApp, gui.currentModel, gui.currentPage, gui.selectedRecordIdx, selectedPK)
 	mainView.Clear()
 
 	if len(result.Records) == 0 {
@@ -324,6 +330,10 @@ func (gui *Gui) convertFieldValue(value string, fieldType string) interface{} {
 }
 
 func (gui *Gui) showMessage(title, message string) error {
+	if strings.EqualFold(strings.TrimSpace(title), "Error") {
+		gui.rememberError("ui", message)
+	}
+
 	if gui.currentModel == "" {
 		tabID := gui.startCommandOutputTab(title)
 		gui.appendOutput(tabID, message+"\n")

@@ -743,6 +743,63 @@ func TestOutputTabStateHelpers(t *testing.T) {
 	}
 }
 
+func TestTabTitleFromCommand(t *testing.T) {
+	if got := tabTitleFromCommand("python manage.py migrate"); got != "python manage.py migrate" {
+		t.Fatalf("unexpected command title: %q", got)
+	}
+	if got := tabTitleFromCommand("   "); got != "Command" {
+		t.Fatalf("expected default command title, got %q", got)
+	}
+	long := "docker compose -f compose.yaml up -d django-admin django-api django-app django-worker"
+	got := tabTitleFromCommand(long)
+	if len(got) > 72 {
+		t.Fatalf("expected truncated title length <= 72, got %d", len(got))
+	}
+}
+
+func TestOrderedOutputTabIDsForPicker(t *testing.T) {
+	gui := &Gui{}
+
+	commandTab1 := gui.startCommandOutputTab("cmd-1")
+	logsTab1 := gui.startLogsOutputTab("logs-1")
+	commandTab2 := gui.startCommandOutputTab("cmd-2")
+
+	got := gui.orderedOutputTabIDsForPicker()
+	if len(got) != 3 {
+		t.Fatalf("expected 3 tabs in picker order, got %d", len(got))
+	}
+	if got[0] != commandTab2 || got[1] != logsTab1 || got[2] != commandTab1 {
+		t.Fatalf("unexpected picker order: %v", got)
+	}
+}
+
+func TestOpenOutputTabsModal(t *testing.T) {
+	gui := &Gui{currentWindow: MainWindow}
+
+	commandTab1 := gui.startCommandOutputTab("cmd-1")
+	logsTab1 := gui.startLogsOutputTab("logs-1")
+	gui.switchOutputTab(commandTab1)
+
+	if err := gui.openOutputTabsModal(nil, nil); err != nil {
+		t.Fatalf("openOutputTabsModal returned error: %v", err)
+	}
+	if !gui.isModalOpen {
+		t.Fatal("expected output tabs modal to be open")
+	}
+	if gui.modalType != "outputTabs" {
+		t.Fatalf("expected modalType=outputTabs, got %q", gui.modalType)
+	}
+	if len(gui.outputTabModalIDs) != 2 {
+		t.Fatalf("expected 2 tab ids in modal, got %d", len(gui.outputTabModalIDs))
+	}
+	if gui.outputTabModalIDs[0] != logsTab1 || gui.outputTabModalIDs[1] != commandTab1 {
+		t.Fatalf("unexpected outputTabModalIDs ordering: %v", gui.outputTabModalIDs)
+	}
+	if gui.outputTabModalIndex != 1 {
+		t.Fatalf("expected modal index to point at current tab, got %d", gui.outputTabModalIndex)
+	}
+}
+
 func TestIsLongRunningMakeTarget(t *testing.T) {
 	cases := map[string]bool{
 		"up":        true,

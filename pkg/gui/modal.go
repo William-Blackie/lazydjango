@@ -138,6 +138,30 @@ func (gui *Gui) renderModal(v *gocui.View) {
 		fmt.Fprintln(v, "Enter: run action  |  Esc: cancel")
 		return
 	}
+	if gui.modalType == "outputTabs" {
+		fmt.Fprintln(v, "Select output tab:")
+		fmt.Fprintln(v, "")
+
+		for i, id := range gui.outputTabModalIDs {
+			tab, ok := gui.outputTabs[id]
+			if !ok {
+				continue
+			}
+			cursor := "  "
+			if i == gui.outputTabModalIndex {
+				cursor = "> "
+			}
+			current := " "
+			if id == gui.outputTab {
+				current = "*"
+			}
+			fmt.Fprintf(v, "%s%s [%s] %s\n", cursor, current, outputRouteLabel(tab.route), tab.title)
+		}
+
+		fmt.Fprintln(v, "")
+		fmt.Fprintln(v, "Enter: switch tab  |  Esc: cancel")
+		return
+	}
 
 	fmt.Fprintln(v, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Fprintln(v, "  j/k or ↑↓: Navigate  │  e or Enter: Edit field  │  Ctrl+S: Save  │  Esc: Cancel")
@@ -349,6 +373,46 @@ func (gui *Gui) setModalKeybindings() {
 			gui.projectModalIndex--
 			if gui.projectModalIndex < 0 {
 				gui.projectModalIndex = len(gui.projectModalActions) - 1
+			}
+			return nil
+		})
+		return
+	}
+	if gui.modalType == "outputTabs" {
+		gui.g.SetKeybinding(ModalWindow, gocui.KeyEnter, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			return gui.submitModal()
+		})
+		gui.g.SetKeybinding(ModalWindow, 'j', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			if len(gui.outputTabModalIDs) == 0 {
+				return nil
+			}
+			gui.outputTabModalIndex = (gui.outputTabModalIndex + 1) % len(gui.outputTabModalIDs)
+			return nil
+		})
+		gui.g.SetKeybinding(ModalWindow, 'k', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			if len(gui.outputTabModalIDs) == 0 {
+				return nil
+			}
+			gui.outputTabModalIndex--
+			if gui.outputTabModalIndex < 0 {
+				gui.outputTabModalIndex = len(gui.outputTabModalIDs) - 1
+			}
+			return nil
+		})
+		gui.g.SetKeybinding(ModalWindow, gocui.KeyArrowDown, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			if len(gui.outputTabModalIDs) == 0 {
+				return nil
+			}
+			gui.outputTabModalIndex = (gui.outputTabModalIndex + 1) % len(gui.outputTabModalIDs)
+			return nil
+		})
+		gui.g.SetKeybinding(ModalWindow, gocui.KeyArrowUp, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			if len(gui.outputTabModalIDs) == 0 {
+				return nil
+			}
+			gui.outputTabModalIndex--
+			if gui.outputTabModalIndex < 0 {
+				gui.outputTabModalIndex = len(gui.outputTabModalIDs) - 1
 			}
 			return nil
 		})
@@ -720,12 +784,19 @@ func (gui *Gui) closeModal() error {
 	gui.containerSelect = nil
 	gui.projectModalActions = nil
 	gui.projectModalIndex = 0
+	gui.outputTabModalIDs = nil
+	gui.outputTabModalIndex = 0
 
 	gui.g.DeleteKeybindings(ModalWindow)
 	gui.g.DeleteKeybindings(ModalInputWindow)
 	gui.g.DeleteView(ModalWindow)
 	gui.g.DeleteView(ModalInputWindow)
-	gui.currentWindow = returnWindow
+	if gui.currentWindow != returnWindow {
+		gui.currentWindow = returnWindow
+		gui.markStateDirty()
+	} else {
+		gui.currentWindow = returnWindow
+	}
 	gui.g.SetCurrentView(returnWindow)
 	return nil
 }
@@ -820,8 +891,10 @@ func (gui *Gui) submitModal() error {
 				gui.resetOutput(tabID, "Restore Snapshot")
 				if err != nil {
 					gui.appendOutput(tabID, fmt.Sprintf("Restore failed: %v\n", err))
+					gui.recordSnapshotActivity("restore", snapshot.ID, snapshot.Name, err)
 				} else {
 					gui.appendOutput(tabID, fmt.Sprintf("Snapshot restored successfully: %s\n", snapshot.Name))
+					gui.recordSnapshotActivity("restore", snapshot.ID, snapshot.Name, nil)
 					gui.project.DiscoverMigrations()
 					if dataView, err := gui.g.View(DataWindow); err == nil {
 						gui.renderDataList(dataView)
@@ -848,6 +921,19 @@ func (gui *Gui) submitModal() error {
 			return err
 		}
 		return gui.runProjectAction(action)
+
+	case "outputTabs":
+		if len(gui.outputTabModalIDs) == 0 {
+			return gui.closeModal()
+		}
+
+		idx := clampSelection(gui.outputTabModalIndex, len(gui.outputTabModalIDs))
+		tabID := gui.outputTabModalIDs[idx]
+		if err := gui.closeModal(); err != nil {
+			return err
+		}
+		gui.switchOutputTab(tabID)
+		return gui.switchPanel(MainWindow)
 	}
 
 	gui.closeModal()

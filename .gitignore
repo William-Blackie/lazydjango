@@ -27,6 +27,7 @@ go.work
 # Local build/test cache
 .cache/
 .gocache/
+.lazy-django/
 
 # GoReleaser artifacts
 dist/
