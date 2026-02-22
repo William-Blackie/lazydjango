@@ -5,11 +5,115 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/awesome-gocui/gocui"
 	"github.com/williamblackie/lazydjango/pkg/django"
 )
+
+func (gui *Gui) moveProjectModalSelection(delta int) {
+	count := len(gui.projectModalActions)
+	if count == 0 {
+		gui.projectModalIndex = 0
+		gui.projectModalOffset = 0
+		gui.projectModalNumber = ""
+		return
+	}
+	next := gui.projectModalIndex + delta
+	if next < 0 {
+		next = 0
+	}
+	if next >= count {
+		next = count - 1
+	}
+	gui.projectModalIndex = next
+	gui.projectModalNumber = ""
+}
+
+func (gui *Gui) clearProjectModalNumberInput() {
+	gui.projectModalNumber = ""
+}
+
+func (gui *Gui) appendProjectModalNumberInput(digit rune) {
+	if len(gui.projectModalActions) == 0 {
+		gui.projectModalNumber = ""
+		return
+	}
+
+	next := gui.projectModalNumber + string(digit)
+	for len(next) > 1 && strings.HasPrefix(next, "0") {
+		next = strings.TrimPrefix(next, "0")
+	}
+	if next == "" {
+		next = "0"
+	}
+
+	value, err := strconv.Atoi(next)
+	if err != nil {
+		return
+	}
+
+	if value < 1 || value > len(gui.projectModalActions) {
+		// Retry using only the latest digit for quick jumps.
+		next = string(digit)
+		value, err = strconv.Atoi(next)
+		if err != nil || value < 1 || value > len(gui.projectModalActions) {
+			return
+		}
+	}
+
+	gui.projectModalNumber = next
+	gui.projectModalIndex = value - 1
+}
+
+func (gui *Gui) projectActionsViewport(v *gocui.View) (int, int) {
+	total := len(gui.projectModalActions)
+	if total == 0 {
+		gui.projectModalOffset = 0
+		return 0, 0
+	}
+
+	_, h := v.Size()
+	visible := h - 4
+	if visible < 1 {
+		visible = 1
+	}
+
+	idx := clampSelection(gui.projectModalIndex, total)
+	start := gui.projectModalOffset
+	if start < 0 {
+		start = 0
+	}
+
+	maxStart := total - visible
+	if maxStart < 0 {
+		maxStart = 0
+	}
+	if start > maxStart {
+		start = maxStart
+	}
+	if idx < start {
+		start = idx
+	}
+	if idx >= start+visible {
+		start = idx - visible + 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start > maxStart {
+		start = maxStart
+	}
+
+	end := start + visible
+	if end > total {
+		end = total
+	}
+
+	gui.projectModalOffset = start
+	return start, end
+}
 
 // openFormModal opens a modal for adding or editing a record
 func (gui *Gui) openFormModal(modalType string, fields []map[string]interface{}, currentValues map[string]string) {
@@ -126,16 +230,44 @@ func (gui *Gui) renderModal(v *gocui.View) {
 		fmt.Fprintln(v, "Select an action:")
 		fmt.Fprintln(v, "")
 
-		for i, action := range gui.projectModalActions {
+		start, end := gui.projectActionsViewport(v)
+		for i := start; i < end; i++ {
+			action := gui.projectModalActions[i]
 			cursor := "  "
 			if i == gui.projectModalIndex {
 				cursor = "> "
 			}
-			fmt.Fprintf(v, "%s%s\n", cursor, action.label)
+			fmt.Fprintf(v, "%s%3d. %s\n", cursor, i+1, action.label)
 		}
 
 		fmt.Fprintln(v, "")
-		fmt.Fprintln(v, "Enter: run action  |  Esc: cancel")
+		total := len(gui.projectModalActions)
+		if total > 0 {
+			selected := clampSelection(gui.projectModalIndex, total) + 1
+			remaining := total - selected
+			if remaining < 0 {
+				remaining = 0
+			}
+			fmt.Fprintf(v, "Selected: %d/%d  Remaining: %d\n", selected, total, remaining)
+			fmt.Fprintf(v, "Showing:  %d-%d of %d\n", start+1, end, total)
+		}
+		if gui.projectModalNumber != "" {
+			fmt.Fprintf(v, "Jump #: %s\n", gui.projectModalNumber)
+		}
+		editHint := ""
+		if isProjectTasksModalTitle(gui.modalTitle) {
+			editHint = "e:edit tasks file"
+		} else if total > 0 {
+			idx := clampSelection(gui.projectModalIndex, total)
+			if isEditableProjectAction(gui.projectModalActions[idx]) {
+				editHint = "e:edit selected"
+			}
+		}
+		if editHint != "" {
+			fmt.Fprintf(v, "Enter: run action  |  %s  |  0-9:jump  g/G:top/bottom  Ctrl+d/u:half-page  |  Esc: cancel\n", editHint)
+		} else {
+			fmt.Fprintln(v, "Enter: run action  |  0-9:jump  g/G:top/bottom  Ctrl+d/u:half-page  |  Esc: cancel")
+		}
 		return
 	}
 	if gui.modalType == "outputTabs" {
@@ -159,7 +291,13 @@ func (gui *Gui) renderModal(v *gocui.View) {
 		}
 
 		fmt.Fprintln(v, "")
-		fmt.Fprintln(v, "Enter: switch tab  |  Esc: cancel")
+		fmt.Fprintln(v, "Enter: switch tab  |  g/G:top/bottom  |  Esc: cancel")
+		return
+	}
+	if gui.modalType == "help" {
+		fmt.Fprintln(v, gui.modalMessage)
+		fmt.Fprintln(v, "")
+		fmt.Fprintln(v, "j/k or Up/Down: scroll  |  Ctrl+d/u: page  |  g/G: top/bottom  |  Enter/Esc/q: close")
 		return
 	}
 
@@ -340,40 +478,124 @@ func (gui *Gui) setModalKeybindings() {
 	}
 	if gui.modalType == "projectActions" {
 		gui.g.SetKeybinding(ModalWindow, gocui.KeyEnter, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			gui.clearProjectModalNumberInput()
 			return gui.submitModal()
 		})
-		gui.g.SetKeybinding(ModalWindow, 'j', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-			if len(gui.projectModalActions) == 0 {
+		gui.g.SetKeybinding(ModalWindow, 'e', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			gui.clearProjectModalNumberInput()
+			return gui.editSelectedProjectModalAction()
+		})
+		for i := '0'; i <= '9'; i++ {
+			digit := i
+			gui.g.SetKeybinding(ModalWindow, digit, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+				gui.appendProjectModalNumberInput(digit)
+				return nil
+			})
+		}
+		gui.g.SetKeybinding(ModalWindow, gocui.KeyBackspace, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			if len(gui.projectModalNumber) == 0 {
 				return nil
 			}
-			gui.projectModalIndex = (gui.projectModalIndex + 1) % len(gui.projectModalActions)
+			gui.projectModalNumber = gui.projectModalNumber[:len(gui.projectModalNumber)-1]
+			if gui.projectModalNumber == "" {
+				return nil
+			}
+			value, err := strconv.Atoi(gui.projectModalNumber)
+			if err != nil || value < 1 || value > len(gui.projectModalActions) {
+				gui.projectModalNumber = ""
+				return nil
+			}
+			gui.projectModalIndex = value - 1
+			return nil
+		})
+		gui.g.SetKeybinding(ModalWindow, gocui.KeyBackspace2, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			if len(gui.projectModalNumber) == 0 {
+				return nil
+			}
+			gui.projectModalNumber = gui.projectModalNumber[:len(gui.projectModalNumber)-1]
+			if gui.projectModalNumber == "" {
+				return nil
+			}
+			value, err := strconv.Atoi(gui.projectModalNumber)
+			if err != nil || value < 1 || value > len(gui.projectModalActions) {
+				gui.projectModalNumber = ""
+				return nil
+			}
+			gui.projectModalIndex = value - 1
+			return nil
+		})
+		gui.g.SetKeybinding(ModalWindow, 'j', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			gui.moveProjectModalSelection(1)
 			return nil
 		})
 		gui.g.SetKeybinding(ModalWindow, 'k', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-			if len(gui.projectModalActions) == 0 {
-				return nil
-			}
-			gui.projectModalIndex--
-			if gui.projectModalIndex < 0 {
-				gui.projectModalIndex = len(gui.projectModalActions) - 1
-			}
+			gui.moveProjectModalSelection(-1)
 			return nil
 		})
 		gui.g.SetKeybinding(ModalWindow, gocui.KeyArrowDown, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-			if len(gui.projectModalActions) == 0 {
-				return nil
-			}
-			gui.projectModalIndex = (gui.projectModalIndex + 1) % len(gui.projectModalActions)
+			gui.moveProjectModalSelection(1)
 			return nil
 		})
 		gui.g.SetKeybinding(ModalWindow, gocui.KeyArrowUp, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-			if len(gui.projectModalActions) == 0 {
+			gui.moveProjectModalSelection(-1)
+			return nil
+		})
+		gui.g.SetKeybinding(ModalWindow, gocui.KeyPgdn, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			if v == nil {
 				return nil
 			}
-			gui.projectModalIndex--
-			if gui.projectModalIndex < 0 {
-				gui.projectModalIndex = len(gui.projectModalActions) - 1
+			_, h := v.Size()
+			step := h - 4
+			if step < 1 {
+				step = 1
 			}
+			gui.moveProjectModalSelection(step)
+			return nil
+		})
+		gui.g.SetKeybinding(ModalWindow, gocui.KeyPgup, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			if v == nil {
+				return nil
+			}
+			_, h := v.Size()
+			step := h - 4
+			if step < 1 {
+				step = 1
+			}
+			gui.moveProjectModalSelection(-step)
+			return nil
+		})
+		gui.g.SetKeybinding(ModalWindow, gocui.KeyCtrlD, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			if v == nil {
+				return nil
+			}
+			_, h := v.Size()
+			step := h / 2
+			if step < 1 {
+				step = 1
+			}
+			gui.moveProjectModalSelection(step)
+			return nil
+		})
+		gui.g.SetKeybinding(ModalWindow, gocui.KeyCtrlU, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			if v == nil {
+				return nil
+			}
+			_, h := v.Size()
+			step := h / 2
+			if step < 1 {
+				step = 1
+			}
+			gui.moveProjectModalSelection(-step)
+			return nil
+		})
+		gui.g.SetKeybinding(ModalWindow, 'g', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			gui.clearProjectModalNumberInput()
+			gui.moveProjectModalSelection(-len(gui.projectModalActions))
+			return nil
+		})
+		gui.g.SetKeybinding(ModalWindow, 'G', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			gui.clearProjectModalNumberInput()
+			gui.moveProjectModalSelection(len(gui.projectModalActions))
 			return nil
 		})
 		return
@@ -414,6 +636,69 @@ func (gui *Gui) setModalKeybindings() {
 			if gui.outputTabModalIndex < 0 {
 				gui.outputTabModalIndex = len(gui.outputTabModalIDs) - 1
 			}
+			return nil
+		})
+		gui.g.SetKeybinding(ModalWindow, 'g', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			if len(gui.outputTabModalIDs) == 0 {
+				return nil
+			}
+			gui.outputTabModalIndex = 0
+			return nil
+		})
+		gui.g.SetKeybinding(ModalWindow, 'G', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			if len(gui.outputTabModalIDs) == 0 {
+				return nil
+			}
+			gui.outputTabModalIndex = len(gui.outputTabModalIDs) - 1
+			return nil
+		})
+		return
+	}
+	if gui.modalType == "help" {
+		gui.g.SetKeybinding(ModalWindow, gocui.KeyEnter, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			return gui.closeModal()
+		})
+		scroll := func(delta int) func(*gocui.Gui, *gocui.View) error {
+			return func(g *gocui.Gui, v *gocui.View) error {
+				if v == nil {
+					return nil
+				}
+				ox, oy := v.Origin()
+				ny := oy + delta
+				if ny < 0 {
+					ny = 0
+				}
+				if err := v.SetOrigin(ox, ny); err != nil {
+					return nil
+				}
+				return nil
+			}
+		}
+		gui.g.SetKeybinding(ModalWindow, 'j', gocui.ModNone, scroll(1))
+		gui.g.SetKeybinding(ModalWindow, 'k', gocui.ModNone, scroll(-1))
+		gui.g.SetKeybinding(ModalWindow, gocui.KeyArrowDown, gocui.ModNone, scroll(1))
+		gui.g.SetKeybinding(ModalWindow, gocui.KeyArrowUp, gocui.ModNone, scroll(-1))
+		gui.g.SetKeybinding(ModalWindow, gocui.KeyCtrlD, gocui.ModNone, scroll(8))
+		gui.g.SetKeybinding(ModalWindow, gocui.KeyCtrlU, gocui.ModNone, scroll(-8))
+		gui.g.SetKeybinding(ModalWindow, 'g', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			if v == nil {
+				return nil
+			}
+			ox, _ := v.Origin()
+			_ = v.SetOrigin(ox, 0)
+			return nil
+		})
+		gui.g.SetKeybinding(ModalWindow, 'G', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			if v == nil {
+				return nil
+			}
+			ox, oy := v.Origin()
+			_, h := v.Size()
+			step := h
+			if step < 1 {
+				step = 1
+			}
+			_ = v.SetOrigin(ox, oy+step)
 			return nil
 		})
 		return
@@ -784,6 +1069,8 @@ func (gui *Gui) closeModal() error {
 	gui.containerSelect = nil
 	gui.projectModalActions = nil
 	gui.projectModalIndex = 0
+	gui.projectModalOffset = 0
+	gui.projectModalNumber = ""
 	gui.outputTabModalIDs = nil
 	gui.outputTabModalIndex = 0
 

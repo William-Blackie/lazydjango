@@ -1,11 +1,20 @@
 package gui
 
 import (
+	"bytes"
+	"fmt"
+	"io"
 	"testing"
 
 	"github.com/awesome-gocui/gocui"
 	"github.com/williamblackie/lazydjango/pkg/django"
 )
+
+type nopWriteCloser struct {
+	io.Writer
+}
+
+func (n nopWriteCloser) Close() error { return nil }
 
 // TestNewGui tests GUI initialization
 func TestNewGui(t *testing.T) {
@@ -602,6 +611,8 @@ func TestProjectMakeActions(t *testing.T) {
 	gui := &Gui{
 		makeTargetsLoaded: true,
 		makeTargets: []makeTarget{
+			{name: "help", description: "Show help"},
+			{name: ".internal", description: "Internal target"},
 			{name: "test", description: "Run tests"},
 			{name: "up", description: "Start containers"},
 			{name: "runserver", description: "Run server"},
@@ -610,17 +621,17 @@ func TestProjectMakeActions(t *testing.T) {
 	}
 
 	actions := gui.projectMakeActions()
-	if len(actions) != 2 {
-		t.Fatalf("expected 2 curated actions, got %d", len(actions))
+	if len(actions) != 4 {
+		t.Fatalf("expected 4 discovered actions, got %d", len(actions))
 	}
-	if actions[0].makeTarget != "up" {
-		t.Fatalf("expected up first by priority, got %q", actions[0].makeTarget)
+	if actions[0].makeTarget != "test" {
+		t.Fatalf("expected first action to preserve make help order, got %q", actions[0].makeTarget)
 	}
-	if actions[1].makeTarget != "test" {
-		t.Fatalf("expected test second by priority, got %q", actions[1].makeTarget)
+	if actions[1].makeTarget != "up" {
+		t.Fatalf("expected second action up, got %q", actions[1].makeTarget)
 	}
-	if actions[0].label != "up - Start containers" {
-		t.Fatalf("expected compact make label, got %q", actions[0].label)
+	if actions[1].label != "up - Start containers" {
+		t.Fatalf("expected compact make label, got %q", actions[1].label)
 	}
 }
 
@@ -633,21 +644,72 @@ func TestShortCommit(t *testing.T) {
 	}
 }
 
+func TestOutputLineHelpers(t *testing.T) {
+	lines := outputLines("one\r\ntwo\rthree\nfour")
+	if len(lines) != 4 {
+		t.Fatalf("expected 4 lines, got %d (%v)", len(lines), lines)
+	}
+	if got := outputLineAt(lines, 99); got != "four" {
+		t.Fatalf("expected clamped line to be 'four', got %q", got)
+	}
+	if got := outputLineAt(nil, 0); got != "" {
+		t.Fatalf("expected empty output line for nil slice, got %q", got)
+	}
+}
+
+func TestSanitizeOutputForClipboard(t *testing.T) {
+	input := "ok\x1b[31mERR\x1b[0m\r\nline\x07\tend\n"
+	got := sanitizeOutputForClipboard(input)
+	want := "okERR\nline\tend"
+	if got != want {
+		t.Fatalf("expected sanitized clipboard text %q, got %q", want, got)
+	}
+}
+
+func TestIsProjectTasksModalTitle(t *testing.T) {
+	if !isProjectTasksModalTitle(" Project Tasks ") {
+		t.Fatal("expected Project Tasks title to match")
+	}
+	if isProjectTasksModalTitle("Favorite Commands") {
+		t.Fatal("did not expect non-task title to match")
+	}
+}
+
+func TestNormalizeRange(t *testing.T) {
+	start, end := normalizeRange(9, 3)
+	if start != 3 || end != 9 {
+		t.Fatalf("expected sorted range (3,9), got (%d,%d)", start, end)
+	}
+}
+
+func TestSendOutputInputWritesLine(t *testing.T) {
+	var buf bytes.Buffer
+	gui := &Gui{
+		outputInputWriters: map[string]io.WriteCloser{
+			"command-001": nopWriteCloser{Writer: &buf},
+		},
+		inputTargetTabID: "command-001",
+	}
+
+	if err := gui.sendOutputInput("abc@example.com"); err != nil {
+		t.Fatalf("sendOutputInput returned error: %v", err)
+	}
+	if got := buf.String(); got != "abc@example.com\n" {
+		t.Fatalf("expected newline-terminated payload, got %q", got)
+	}
+}
+
 func TestProjectActionsContainCoreItems(t *testing.T) {
 	gui := &Gui{
 		project: &django.Project{},
 	}
 
-	foundRun := false
-	foundStop := false
+	foundServer := false
 	foundMigrations := false
 	foundTools := false
 	for _, action := range gui.projectActions() {
-		if action.label == "Run dev server" {
-			foundRun = true
-		}
-		if action.label == "Stop dev server" {
-			foundStop = true
+		if action.label == "Server..." {
+			foundServer = true
 		}
 		if action.label == "Migrations..." {
 			foundMigrations = true
@@ -657,11 +719,8 @@ func TestProjectActionsContainCoreItems(t *testing.T) {
 		}
 	}
 
-	if !foundRun {
-		t.Fatal("expected project actions to include Run dev server")
-	}
-	if !foundStop {
-		t.Fatal("expected project actions to include Stop dev server")
+	if !foundServer {
+		t.Fatal("expected project actions to include Server...")
 	}
 	if !foundMigrations {
 		t.Fatal("expected project actions to include Migrations...")
@@ -692,6 +751,122 @@ func TestProjectToolActionsContainExpectedCommands(t *testing.T) {
 	}
 	if !foundURLs {
 		t.Fatal("expected tool actions to include Show URL patterns")
+	}
+}
+
+func TestProjectServerActionsContainStartAndStop(t *testing.T) {
+	gui := &Gui{
+		project: &django.Project{},
+	}
+
+	foundStart := false
+	foundStop := false
+	for _, action := range gui.projectServerActions() {
+		if action.label == "Start dev server" {
+			foundStart = true
+		}
+		if action.label == "Stop dev server" {
+			foundStop = true
+		}
+	}
+
+	if !foundStart {
+		t.Fatal("expected server actions to include Start dev server")
+	}
+	if !foundStop {
+		t.Fatal("expected server actions to include Stop dev server")
+	}
+}
+
+func TestMoveProjectModalSelectionClamps(t *testing.T) {
+	gui := &Gui{
+		projectModalActions: []projectAction{
+			{label: "one"},
+			{label: "two"},
+		},
+	}
+
+	gui.moveProjectModalSelection(10)
+	if gui.projectModalIndex != 1 {
+		t.Fatalf("expected index to clamp to last item, got %d", gui.projectModalIndex)
+	}
+
+	gui.moveProjectModalSelection(-10)
+	if gui.projectModalIndex != 0 {
+		t.Fatalf("expected index to clamp to first item, got %d", gui.projectModalIndex)
+	}
+}
+
+func TestProjectActionsViewportKeepsSelectionVisible(t *testing.T) {
+	g, err := gocui.NewGui(gocui.OutputNormal, false)
+	if err != nil {
+		t.Skip("Cannot create gocui in test environment")
+	}
+	defer g.Close()
+
+	v, err := g.SetView("viewport-test", 0, 0, 60, 10, 0)
+	if err != nil && err != gocui.ErrUnknownView {
+		t.Fatalf("failed to create view: %v", err)
+	}
+
+	actions := make([]projectAction, 0, 25)
+	for i := 0; i < 25; i++ {
+		actions = append(actions, projectAction{label: fmt.Sprintf("action-%02d", i)})
+	}
+	gui := &Gui{
+		projectModalActions: actions,
+		projectModalIndex:   0,
+		projectModalOffset:  0,
+	}
+
+	start, end := gui.projectActionsViewport(v)
+	if start != 0 {
+		t.Fatalf("expected viewport start=0 initially, got %d", start)
+	}
+	if end <= start {
+		t.Fatalf("expected non-empty viewport, got start=%d end=%d", start, end)
+	}
+
+	gui.projectModalIndex = 20
+	start, end = gui.projectActionsViewport(v)
+	if gui.projectModalIndex < start || gui.projectModalIndex >= end {
+		t.Fatalf("expected selected index %d to be visible in [%d,%d)", gui.projectModalIndex, start, end)
+	}
+	if start == 0 {
+		t.Fatal("expected viewport to scroll for deeper index")
+	}
+}
+
+func TestProjectModalNumberInputJump(t *testing.T) {
+	actions := make([]projectAction, 0, 12)
+	for i := 0; i < 12; i++ {
+		actions = append(actions, projectAction{label: fmt.Sprintf("task-%d", i+1)})
+	}
+	gui := &Gui{projectModalActions: actions}
+
+	gui.appendProjectModalNumberInput('1')
+	if gui.projectModalIndex != 0 {
+		t.Fatalf("expected index 0 after input '1', got %d", gui.projectModalIndex)
+	}
+	if gui.projectModalNumber != "1" {
+		t.Fatalf("expected modal number '1', got %q", gui.projectModalNumber)
+	}
+
+	gui.appendProjectModalNumberInput('2')
+	if gui.projectModalIndex != 11 {
+		t.Fatalf("expected index 11 after input '12', got %d", gui.projectModalIndex)
+	}
+	if gui.projectModalNumber != "12" {
+		t.Fatalf("expected modal number '12', got %q", gui.projectModalNumber)
+	}
+
+	// Overflowing numbers fallback to the last digit when valid.
+	gui.appendProjectModalNumberInput('9')
+	if gui.projectModalIndex != 8 {
+		t.Fatalf("expected index 8 after overflow fallback to '9', got %d", gui.projectModalIndex)
+	}
+	if gui.projectModalNumber != "9" {
+		t.Fatalf("expected modal number to fallback to '9', got %q", gui.projectModalNumber)
 	}
 }
 

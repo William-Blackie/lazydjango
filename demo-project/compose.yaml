@@ -41,9 +41,9 @@ services:
       - "8000:8000"
     environment:
       - DJANGO_SETTINGS_MODULE=mysite.settings
-      - POSTGRES_DB=mabyduck
-      - POSTGRES_USER=mabyduck_user
-      - POSTGRES_PASSWORD=mabyduck_password
+      - POSTGRES_DB=demodb
+      - POSTGRES_USER=demo_user
+      - POSTGRES_PASSWORD=demo_password
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - REDIS_HOST=redis

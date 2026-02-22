@@ -163,12 +163,12 @@ func (gui *Gui) printTableRows(v *gocui.View, records []django.ModelRecord, fiel
 // printTableFooter prints the footer with controls
 func (gui *Gui) printTableFooter(v *gocui.View, hasNext bool) {
 	fmt.Fprintln(v, "\n------------------------------------------------------------")
-	fmt.Fprint(v, "j/k or J/K: records  |  a:add  e:edit  d:delete")
+	fmt.Fprint(v, "j/k or J/K: records  |  g/G:first/last  |  a:add  e:edit  d:delete")
 	if gui.currentPage > 1 {
-		fmt.Fprint(v, "  |  p:prev page")
+		fmt.Fprint(v, "  |  p or Ctrl+u:prev page")
 	}
 	if hasNext {
-		fmt.Fprint(v, "  |  n:next page")
+		fmt.Fprint(v, "  |  n or Ctrl+d:next page")
 	}
 	fmt.Fprintln(v)
 }

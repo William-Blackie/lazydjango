@@ -7,11 +7,13 @@ It gives you one place to inspect project state, run common tasks, browse/edit m
 
 - Django project auto-discovery (`manage.py` in current/parent directories)
 - LazyGit-style panel layout with clear focus and `>` cursor selection
+- Active panel frame/title highlighting for clearer focus state
 - Model browsing with pagination and CRUD modals
 - Snapshot create/list/restore for SQLite/PostgreSQL/MySQL
 - Docker-aware workflows (service selection + start/stop actions)
 - Makefile-aware workflows (`make help` + curated task actions)
 - Startup update check against latest GitHub release (non-blocking)
+- Startup summary in Output with quick-start guidance
 - Project-scoped memory and history files under `.lazy-django/`
 
 ## Installation
@@ -61,11 +63,11 @@ Dependency preflight:
 
 Project panel actions are intentionally compact:
 
-- `Run dev server`
-- `Stop dev server`
+- `Server...` (start/stop dev server)
 - `Containers...` (if Docker configured)
-- `Make Tasks...` (if Makefile present)
+- `Project Tasks...` (project-local task list)
 - `Favorites...` (project command MRU)
+- `Recent Commands...` (rerun command history)
 - `Migrations...`
 - `Tools...` (includes `History report`)
 
@@ -77,6 +79,12 @@ Project panel actions are intentionally compact:
 - `Tab` / `Shift+Tab` or `h` / `l`: previous/next panel
 - `j` / `k`: move selection (or scroll output when Output is focused)
 - `Enter`: execute/open selected item
+- `:`: open centered command modal (run shell/manage/make commands)
+- `:help`: open in-app keybindings/instructions modal
+- `/`: open centered search modal and jump to closest match in focused panel/output
+- `v`: toggle output selection mode (Output panel)
+- `y`: copy output line or selected output range
+- `i`: send input to the running process in selected output tab
 - `r`: refresh project metadata
 - `U`: open update details
 - `q` or `Ctrl+C`: quit
@@ -84,9 +92,10 @@ Project panel actions are intentionally compact:
 ### Project
 
 - `Enter`: run action / open action modal
-- `s`: stop running dev server
+- `e`: edit selected task configuration (when cursor is on `Project Tasks...` or inside that modal)
 - `u`: start container selector modal
 - `D`: stop container selector modal
+- in action modals: `0-9` jumps to numbered action rows
 
 ### Database
 
@@ -109,6 +118,10 @@ Project panel actions are intentionally compact:
 - `o`: jump to latest tab of the other type (`Command` / `Logs`)
 - `x`: close active tab
 - `Ctrl+L`: clear active tab
+- `v`: start/stop line selection mode
+- `j` / `k` (while selecting): extend selection
+- `y`: copy current line or selected lines to clipboard
+- `i`: open process input prompt (for interactive commands)
 
 ### Data (Snapshots)
 
@@ -148,6 +161,15 @@ Snapshot data is stored in:
 ```text
 <project>/.lazy-django/snapshots/
 ```
+
+Project task memory is stored in:
+
+```text
+<project>/.lazy-django/tasks.json
+```
+
+On first run, LazyDjango writes tasks from the discovered project workflow (`make help` + Django actions) for the project it was started in; after that, this file is the source of truth until you edit it.
+This file is project-local and should stay out of version control in your app repo.
 
 ## Development
 

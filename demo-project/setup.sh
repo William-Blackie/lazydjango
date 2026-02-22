@@ -12,11 +12,11 @@ services:
     environment:
       - POSTGRES_DB=demodb
       - POSTGRES_USER=demo_user
-      - POSTGRES_PASSWORD=mabyduck_password
+      - POSTGRES_PASSWORD=demo_password
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "mabyduck_user"]
+      test: ["CMD", "pg_isready", "-U", "demo_user", "-d", "demodb"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -28,10 +28,10 @@ EOF
 # Create .env file
 cat > build/.env << 'EOF'
 DB_HOST=postgres
-DB_NAME=mabyduck
+DB_NAME=demodb
 DB_PORT=5432
-DB_USER=mabyduck_user
-DB_PASSWORD=mabyduck_password
+DB_USER=demo_user
+DB_PASSWORD=demo_password
 EOF
 
 # Create manage.py

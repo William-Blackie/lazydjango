@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/awesome-gocui/gocui"
 	"github.com/williamblackie/lazydjango/pkg/django"
 	"github.com/williamblackie/lazydjango/pkg/gui"
 )
@@ -154,7 +155,10 @@ func main() {
 
 	// Run GUI
 	if err := gui.RunWithVersion(project, version); err != nil {
+		if errors.Is(err, gocui.ErrQuit) {
+			return
+		}
 		fmt.Fprintf(os.Stderr, "GUI Error: %v\n", err)
-		log.Fatal(err)
+		os.Exit(1)
 	}
 }
