@@ -137,10 +137,14 @@ const (
 )
 
 const (
-	panelFrameColorInactive = gocui.ColorWhite
+	panelBgColor            = gocui.ColorBlack
+	panelTextColor          = gocui.ColorWhite
+	panelFrameColorInactive = gocui.ColorBlue
 	panelFrameColorActive   = gocui.ColorGreen
-	panelTitleColorInactive = gocui.ColorWhite
+	panelTitleColorInactive = gocui.ColorCyan | gocui.AttrBold
 	panelTitleColorActive   = gocui.ColorGreen | gocui.AttrBold
+	panelSelectBgColor      = gocui.ColorCyan
+	panelSelectFgColor      = gocui.ColorBlack | gocui.AttrBold
 )
 
 var panelOrder = []string{MenuWindow, ListWindow, DataWindow, MainWindow}
@@ -183,24 +187,41 @@ func clampSelection(selection, count int) int {
 }
 
 func (gui *Gui) panelTitle(windowName, label string) string {
-	if gui.currentWindow == windowName && !gui.isModalOpen {
-		return fmt.Sprintf(" > %s ", label)
+	prefix := ""
+	switch windowName {
+	case MenuWindow:
+		prefix = "[1]"
+	case ListWindow:
+		prefix = "[2]"
+	case DataWindow:
+		prefix = "[3]"
+	case MainWindow:
+		prefix = "[4]"
 	}
-	return fmt.Sprintf("   %s ", label)
+	if prefix != "" {
+		label = fmt.Sprintf("%s %s", prefix, label)
+	}
+	return fmt.Sprintf(" %s ", label)
 }
 
 func (gui *Gui) stylePanelView(v *gocui.View, windowName string) {
 	if v == nil {
 		return
 	}
+	v.BgColor = panelBgColor
+	v.FgColor = panelTextColor
 	isActive := gui.currentWindow == windowName && !gui.isModalOpen && gui.inputMode == ""
 	if isActive {
 		v.FrameColor = panelFrameColorActive
 		v.TitleColor = panelTitleColorActive
+		v.SelBgColor = panelSelectBgColor
+		v.SelFgColor = panelSelectFgColor
 		return
 	}
 	v.FrameColor = panelFrameColorInactive
 	v.TitleColor = panelTitleColorInactive
+	v.SelBgColor = panelSelectBgColor
+	v.SelFgColor = panelSelectFgColor
 }
 
 func (gui *Gui) projectActions() []projectAction {
@@ -744,7 +765,8 @@ func NewGui(project *django.Project) (*Gui, error) {
 
 	g.Highlight = false
 	g.Cursor = false
-	g.FgColor = gocui.ColorWhite
+	g.BgColor = panelBgColor
+	g.FgColor = panelTextColor
 	g.SetManagerFunc(gui.layout)
 
 	if err := gui.setKeybindings(); err != nil {
@@ -849,6 +871,8 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 		return err
 	}
 	optionsView.Frame = false
+	optionsView.BgColor = panelBgColor
+	optionsView.FgColor = panelTitleColorInactive
 	gui.updateOptionsView(optionsView)
 
 	if !gui.updateCheckStarted {
@@ -874,6 +898,8 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 		modalView.Title = fmt.Sprintf(" %s ", gui.modalTitle)
 		modalView.Wrap = true
 		modalView.Highlight = false
+		modalView.BgColor = panelBgColor
+		modalView.FgColor = panelTextColor
 		modalView.FrameColor = panelFrameColorActive
 		modalView.TitleColor = panelTitleColorActive
 		gui.renderModal(modalView)
@@ -1416,8 +1442,8 @@ func (gui *Gui) renderOutputView(v *gocui.View) {
 	end = clampSelection(end, len(lines))
 
 	v.Highlight = true
-	v.SelBgColor = gocui.ColorGreen
-	v.SelFgColor = gocui.ColorBlack | gocui.AttrBold
+	v.SelBgColor = panelSelectBgColor
+	v.SelFgColor = panelSelectFgColor
 	for i := 0; i < len(lines); i++ {
 		_ = v.SetHighlight(i, false)
 	}
@@ -2305,6 +2331,8 @@ func (gui *Gui) layoutInputPrompt(g *gocui.Gui, maxX, maxY int) error {
 	v.Editable = true
 	v.Wrap = false
 	v.Highlight = false
+	v.BgColor = panelBgColor
+	v.FgColor = panelTextColor
 	v.Title = gui.inputBarTitle()
 	v.FrameColor = panelFrameColorActive
 	v.TitleColor = panelTitleColorActive

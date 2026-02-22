@@ -9,10 +9,10 @@ import (
 func TestPanelTitleFocus(t *testing.T) {
 	gui := &Gui{currentWindow: MenuWindow}
 
-	if got := gui.panelTitle(MenuWindow, "Project"); got != " > Project " {
+	if got := gui.panelTitle(MenuWindow, "Project"); got != " [1] Project " {
 		t.Fatalf("unexpected focused title: %q", got)
 	}
-	if got := gui.panelTitle(ListWindow, "Database"); got != "   Database " {
+	if got := gui.panelTitle(ListWindow, "Database"); got != " [2] Database " {
 		t.Fatalf("unexpected unfocused title: %q", got)
 	}
 }
