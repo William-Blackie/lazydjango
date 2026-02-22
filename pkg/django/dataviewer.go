@@ -25,7 +25,11 @@ func NewDataViewer(project commandRunner) *DataViewer {
 func (dv *DataViewer) runPythonScript(code string) (map[string]interface{}, error) {
 	output, err := dv.project.RunCommand("shell", "-c", code)
 	if err != nil {
-		return nil, err
+		out := strings.TrimSpace(output)
+		if out == "" {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %s", err, out)
 	}
 
 	jsonPayload, err := extractJSONPayload(output)
@@ -88,15 +92,54 @@ func pythonLiteral(value interface{}) string {
 	return string(data)
 }
 
-// serializeFields generates Python code to serialize model fields
+const pythonJSONSafeHelper = `
+def _json_safe(value):
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if hasattr(value, 'isoformat'):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    if hasattr(value, 'pk'):
+        try:
+            return value.pk
+        except Exception:
+            pass
+    try:
+        json.dumps(value)
+        return value
+    except Exception:
+        return str(value)
+`
+
+// serializeFieldsCode is a raw Python block; call serializeFieldsCodeWithIndent for context-safe insertion.
 const serializeFieldsCode = `fields = {}
-        for field in model._meta.fields:
-            value = getattr(obj, field.name)
-            if hasattr(value, 'isoformat'):
-                value = value.isoformat()
-            elif hasattr(value, 'pk'):
-                value = value.pk
-            fields[field.name] = value`
+for field in model._meta.fields:
+    value = getattr(obj, field.name)
+    fields[field.name] = _json_safe(value)`
+
+func serializeFieldsCodeWithIndent(spaces int) string {
+	return indentPythonBlock(serializeFieldsCode, spaces)
+}
+
+func indentPythonBlock(block string, spaces int) string {
+	if spaces < 0 {
+		spaces = 0
+	}
+	pad := strings.Repeat(" ", spaces)
+	lines := strings.Split(strings.TrimRight(block, "\n"), "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			lines[i] = ""
+			continue
+		}
+		lines[i] = pad + line
+	}
+	return strings.Join(lines, "\n")
+}
 
 // ModelRecord represents a single database record
 type ModelRecord struct {
@@ -130,16 +173,17 @@ func (dv *DataViewer) QueryModel(appName, modelName string, filters map[string]s
 import json
 from django.apps import apps
 
+%s
 try:
     model = apps.get_model(%s, %s)
     qs = model.objects.all()
 %s
     total = qs.count()
     records = qs[%d:%d]
-    
+
     data = []
     for obj in records:
-        %s
+%s
         data.append({'pk': obj.pk, 'model': f'{model._meta.app_label}.{model.__name__}', 'fields': fields})
 
     print(json.dumps({
@@ -152,8 +196,8 @@ try:
     }))
 except Exception as e:
     print(json.dumps({'error': str(e)}))
-`, pythonLiteral(appName), pythonLiteral(modelName), dv.buildFilterCode(filters), offset, offset+pageSize,
-		serializeFieldsCode, page, pageSize, offset+pageSize, page)
+`, pythonJSONSafeHelper, pythonLiteral(appName), pythonLiteral(modelName), dv.buildFilterCode(filters), offset, offset+pageSize,
+		serializeFieldsCodeWithIndent(8), page, pageSize, offset+pageSize, page)
 
 	resultMap, err := dv.runPythonScript(pythonCmd)
 	if err != nil {
@@ -174,14 +218,15 @@ func (dv *DataViewer) GetRecord(appName, modelName string, pk interface{}) (*Mod
 import json
 from django.apps import apps
 
+%s
 try:
     model = apps.get_model(%s, %s)
     obj = model.objects.get(pk=%s)
-    %s
+%s
     print(json.dumps({'pk': obj.pk, 'model': f'{obj._meta.app_label}.{obj.__class__.__name__}', 'fields': fields}))
 except Exception as e:
     print(json.dumps({'error': str(e)}))
-`, pythonLiteral(appName), pythonLiteral(modelName), pythonLiteral(pk), serializeFieldsCode)
+`, pythonJSONSafeHelper, pythonLiteral(appName), pythonLiteral(modelName), pythonLiteral(pk), serializeFieldsCodeWithIndent(4))
 
 	result, err := dv.runPythonScript(pythonCmd)
 	if err != nil {
@@ -293,6 +338,7 @@ func (dv *DataViewer) GetModelFields(appName, modelName string) ([]map[string]in
 import json
 from django.apps import apps
 
+%s
 try:
     model = apps.get_model(%s, %s)
     fields = []
@@ -308,7 +354,7 @@ try:
         if hasattr(field, 'max_length') and field.max_length:
             info['max_length'] = field.max_length
         if hasattr(field, 'choices') and field.choices:
-            info['choices'] = [{'value': k, 'label': v} for k, v in field.choices]
+            info['choices'] = [{'value': _json_safe(k), 'label': str(v)} for k, v in field.choices]
         
         # Add related model info for ForeignKey fields
         if field.get_internal_type() == 'ForeignKey':
@@ -320,7 +366,7 @@ try:
     print(json.dumps({'fields': fields}))
 except Exception as e:
     print(json.dumps({'error': str(e)}))
-`, pythonLiteral(appName), pythonLiteral(modelName))
+`, pythonJSONSafeHelper, pythonLiteral(appName), pythonLiteral(modelName))
 
 	result, err := dv.runPythonScript(pythonCmd)
 	if err != nil {
@@ -360,6 +406,7 @@ import json
 from django.apps import apps
 from django.db.models import Q
 
+%s
 try:
     model = apps.get_model(%s, %s)
     query = Q()
@@ -370,10 +417,10 @@ try:
     qs = model.objects.filter(query) if str(query) != '(AND: )' else model.objects.all()
     total = qs.count()
     records = qs[%d:%d]
-    
+
     data = []
     for obj in records:
-        %s
+%s
         data.append({'pk': obj.pk, 'model': f'{model._meta.app_label}.{model.__name__}', 'fields': fields})
 
     print(json.dumps({
@@ -386,8 +433,8 @@ try:
     }))
 except Exception as e:
     print(json.dumps({'error': str(e)}))
-`, pythonLiteral(appName), pythonLiteral(modelName), pythonLiteral(searchTerm), offset, offset+pageSize,
-		serializeFieldsCode, page, pageSize, offset+pageSize, page)
+`, pythonJSONSafeHelper, pythonLiteral(appName), pythonLiteral(modelName), pythonLiteral(searchTerm), offset, offset+pageSize,
+		serializeFieldsCodeWithIndent(8), page, pageSize, offset+pageSize, page)
 
 	resultMap, err := dv.runPythonScript(pythonCmd)
 	if err != nil {
@@ -425,6 +472,7 @@ func (dv *DataViewer) GetRelatedObjects(appName, modelName string, pk interface{
 import json
 from django.apps import apps
 
+%s
 try:
     model = apps.get_model(%s, %s)
     obj = model.objects.get(pk=%s)
@@ -434,7 +482,7 @@ try:
     data = []
     for rel_obj in related_objs:
         if rel_obj:
-            %s
+%s
             data.append({
                 'pk': rel_obj.pk,
                 'model': f'{rel_obj._meta.app_label}.{rel_obj._meta.model_name}',
@@ -443,7 +491,7 @@ try:
     print(json.dumps({'records': data}))
 except Exception as e:
     print(json.dumps({'error': str(e)}))
-`, pythonLiteral(appName), pythonLiteral(modelName), pythonLiteral(pk), pythonLiteral(fieldName), serializeFieldsCode)
+`, pythonJSONSafeHelper, pythonLiteral(appName), pythonLiteral(modelName), pythonLiteral(pk), pythonLiteral(fieldName), serializeFieldsCodeWithIndent(12))
 
 	resultMap, err := dv.runPythonScript(pythonCmd)
 	if err != nil {

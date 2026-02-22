@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -28,6 +29,13 @@ type Project struct {
 	InstalledApps     []string
 	Middleware        []string
 	ServerRunning     bool
+}
+
+// DiscoverOptions controls the depth of project discovery.
+type DiscoverOptions struct {
+	// DeepScan runs Django management commands to hydrate settings, models, and migrations.
+	// When false, discovery is filesystem-only and significantly faster.
+	DeepScan bool
 }
 
 // App represents a Django app
@@ -62,13 +70,23 @@ type DatabaseInfo struct {
 	IsUsable bool
 }
 
+type composeServiceSpec struct {
+	name string
+	body []string
+}
+
 // DiscoverProject finds Django project in current or parent directories
 func DiscoverProject(startDir string) (*Project, error) {
+	return DiscoverProjectWithOptions(startDir, DiscoverOptions{DeepScan: true})
+}
+
+// DiscoverProjectWithOptions finds Django project in current or parent directories.
+func DiscoverProjectWithOptions(startDir string, opts DiscoverOptions) (*Project, error) {
 	dir := startDir
 	for {
 		managePy := filepath.Join(dir, "manage.py")
 		if _, err := os.Stat(managePy); err == nil {
-			return buildProject(dir, managePy)
+			return buildProjectWithOptions(dir, managePy, opts)
 		}
 
 		parent := filepath.Dir(dir)
@@ -81,6 +99,10 @@ func DiscoverProject(startDir string) (*Project, error) {
 
 // buildProject constructs Project from directory
 func buildProject(rootDir, managePy string) (*Project, error) {
+	return buildProjectWithOptions(rootDir, managePy, DiscoverOptions{DeepScan: true})
+}
+
+func buildProjectWithOptions(rootDir, managePy string, opts DiscoverOptions) (*Project, error) {
 	proj := &Project{
 		RootDir:      rootDir,
 		ManagePyPath: managePy,
@@ -110,10 +132,17 @@ func buildProject(rootDir, managePy string) (*Project, error) {
 	proj.HasPytest = fileExists(filepath.Join(rootDir, "pytest.ini")) ||
 		fileExists(filepath.Join(rootDir, "pyproject.toml"))
 
-	// Discover settings and database info
-	proj.DiscoverSettings()
-	proj.DiscoverModels()
-	proj.DiscoverMigrations()
+	if opts.DeepScan {
+		// Discover settings and database info.
+		proj.DiscoverSettings()
+		proj.DiscoverModels()
+		proj.DiscoverMigrations()
+	} else {
+		// Fast path for UI startup: keep metadata lightweight and defer deep discovery.
+		if module := os.Getenv("DJANGO_SETTINGS_MODULE"); module != "" {
+			proj.SettingsModule = module
+		}
+	}
 
 	return proj, nil
 }
@@ -194,14 +223,69 @@ func extractLikelySettingsModule(line string) string {
 
 // RunCommand executes Django management command
 func (p *Project) RunCommand(args ...string) (string, error) {
-	var cmd *exec.Cmd
-
 	if p.HasDocker && p.DockerService != "" && isDockerAvailable() {
-		cmd = p.buildDockerCommand(args...)
-	} else {
-		cmd = exec.Command(pythonBinary(), append([]string{p.ManagePyPath}, args...)...)
+		output, err := p.runDockerCommandForService(p.DockerService, args...)
+		if err == nil || !shouldRetryWithAlternateDockerService(output, err) {
+			return output, err
+		}
+
+		for _, service := range findDjangoServiceCandidates(p.DockerComposeFile) {
+			service = strings.TrimSpace(service)
+			if service == "" || service == p.DockerService {
+				continue
+			}
+
+			nextOutput, nextErr := p.runDockerCommandForService(service, args...)
+			if nextErr == nil {
+				// Promote a working service for subsequent commands.
+				p.DockerService = service
+				return nextOutput, nil
+			}
+			if !shouldRetryWithAlternateDockerService(nextOutput, nextErr) {
+				return nextOutput, nextErr
+			}
+			output, err = nextOutput, nextErr
+		}
+
+		return output, err
 	}
 
+	cmd := exec.Command(pythonBinary(), append([]string{p.ManagePyPath}, args...)...)
+	cmd.Dir = p.RootDir
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
+func shouldRetryWithAlternateDockerService(output string, err error) bool {
+	if err == nil {
+		return false
+	}
+
+	text := strings.ToLower(strings.TrimSpace(output + "\n" + err.Error()))
+	if text == "" {
+		return false
+	}
+
+	// Retry only when docker exec failed to target a usable service.
+	hints := []string{
+		"is not running",
+		"no such service",
+		"service not found",
+		"container is not running",
+		"cannot exec in a stopped state",
+		"oci runtime exec failed",
+		"executable file not found in $path",
+	}
+	for _, hint := range hints {
+		if strings.Contains(text, hint) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Project) runDockerCommandForService(service string, args ...string) (string, error) {
+	cmd := p.buildDockerCommandForService(service, args...)
 	cmd.Dir = p.RootDir
 	output, err := cmd.CombinedOutput()
 	return string(output), err
@@ -209,11 +293,20 @@ func (p *Project) RunCommand(args ...string) (string, error) {
 
 // buildDockerCommand creates a Docker-based manage.py command
 func (p *Project) buildDockerCommand(args ...string) *exec.Cmd {
+	return p.buildDockerCommandForService(p.DockerService, args...)
+}
+
+func (p *Project) buildDockerCommandForService(service string, args ...string) *exec.Cmd {
+	service = strings.TrimSpace(service)
+	if service == "" {
+		service = p.DockerService
+	}
+
 	composeArgs := []string{"compose"}
 	if p.DockerComposeFile != "" {
 		composeArgs = append(composeArgs, "-f", p.DockerComposeFile)
 	}
-	composeArgs = append(composeArgs, "exec", "-T", p.DockerService, "python", "manage.py")
+	composeArgs = append(composeArgs, "exec", "-T", service, "python", "manage.py")
 	composeArgs = append(composeArgs, args...)
 
 	// Try docker (v2) first, fallback to docker-compose
@@ -502,41 +595,179 @@ func (p *Project) IsServerRunning() bool {
 	return err == nil
 }
 
-// findDjangoService finds the Django service name in docker-compose.yml
-func findDjangoService(rootDir string) string {
-	// rootDir is actually the compose file path passed in
-	composePath := rootDir
+func leadingSpaces(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " "))
+}
+
+func stripYAMLComment(line string) string {
+	// Keep this conservative; compose service names do not need quote-aware parsing.
+	if idx := strings.Index(line, "#"); idx >= 0 {
+		return line[:idx]
+	}
+	return line
+}
+
+func parseComposeServices(composeContent string) []composeServiceSpec {
+	lines := strings.Split(composeContent, "\n")
+	inServices := false
+	servicesIndent := -1
+
+	var services []composeServiceSpec
+	current := -1
+	for _, raw := range lines {
+		line := stripYAMLComment(raw)
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+
+		indent := leadingSpaces(line)
+		trimmed := strings.TrimSpace(line)
+
+		if !inServices {
+			if trimmed == "services:" {
+				inServices = true
+				servicesIndent = indent
+			}
+			continue
+		}
+
+		if indent <= servicesIndent {
+			break
+		}
+
+		if indent == servicesIndent+2 && strings.HasSuffix(trimmed, ":") {
+			name := strings.TrimSpace(strings.TrimSuffix(trimmed, ":"))
+			if name == "" {
+				continue
+			}
+			services = append(services, composeServiceSpec{name: name})
+			current = len(services) - 1
+			continue
+		}
+
+		if current >= 0 && indent > servicesIndent+2 {
+			services[current].body = append(services[current].body, trimmed)
+		}
+	}
+
+	return services
+}
+
+func scoreDjangoService(spec composeServiceSpec) int {
+	name := strings.ToLower(strings.TrimSpace(spec.name))
+	body := strings.ToLower(strings.Join(spec.body, "\n"))
+	score := 0
+
+	switch name {
+	case "web", "django", "app", "backend", "django-app":
+		score += 250
+	}
+	if strings.Contains(name, "django") {
+		score += 120
+	}
+	if strings.Contains(name, "web") {
+		score += 80
+	}
+	if strings.Contains(name, "app") {
+		score += 60
+	}
+	if strings.Contains(name, "api") {
+		score += 40
+	}
+	if strings.Contains(name, "admin") {
+		score += 30
+	}
+
+	if strings.Contains(name, "worker") || strings.Contains(name, "celery") || strings.Contains(name, "rq") {
+		score -= 180
+	}
+	if strings.Contains(name, "redis") || strings.Contains(name, "postgres") ||
+		strings.Contains(name, "mysql") || strings.Contains(name, "db") ||
+		strings.Contains(name, "proxy") || strings.Contains(name, "webpack") ||
+		strings.Contains(name, "nginx") || strings.Contains(name, "rabbit") {
+		score -= 260
+	}
+
+	if strings.Contains(body, "manage.py runserver") {
+		score += 260
+	}
+	if strings.Contains(body, "python manage.py") || strings.Contains(body, "./manage.py") {
+		score += 170
+	}
+	if strings.Contains(body, "gunicorn") || strings.Contains(body, "uvicorn") || strings.Contains(body, "daphne") {
+		score += 110
+	}
+	if strings.Contains(body, "django_settings_module") {
+		score += 50
+	}
+	if strings.Contains(body, "rqworker") || strings.Contains(body, "celery worker") {
+		score -= 180
+	}
+	if strings.Contains(body, "redis-server") || strings.Contains(body, "postgres:") {
+		score -= 120
+	}
+
+	return score
+}
+
+func findDjangoServiceCandidates(composePath string) []string {
+	composePath = strings.TrimSpace(composePath)
+	if composePath == "" {
+		return nil
+	}
+
 	content, err := os.ReadFile(composePath)
 	if err != nil {
+		return nil
+	}
+
+	specs := parseComposeServices(string(content))
+	if len(specs) == 0 {
+		return nil
+	}
+
+	type rankedService struct {
+		name  string
+		score int
+	}
+	ranked := make([]rankedService, 0, len(specs))
+	for _, spec := range specs {
+		ranked = append(ranked, rankedService{
+			name:  spec.name,
+			score: scoreDjangoService(spec),
+		})
+	}
+
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].score == ranked[j].score {
+			return ranked[i].name < ranked[j].name
+		}
+		return ranked[i].score > ranked[j].score
+	})
+
+	names := make([]string, 0, len(ranked))
+	seen := make(map[string]struct{}, len(ranked))
+	for _, candidate := range ranked {
+		name := strings.TrimSpace(candidate.name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	return names
+}
+
+// findDjangoService finds the Django service name in docker-compose.yml
+func findDjangoService(composePath string) string {
+	candidates := findDjangoServiceCandidates(composePath)
+	if len(candidates) == 0 {
 		return "web"
 	}
-
-	lines := strings.Split(string(content), "\n")
-	// First pass: look for explicit service names that match common django names
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasSuffix(trimmed, ":") && !strings.Contains(trimmed, "#") {
-			serviceName := strings.TrimSuffix(trimmed, ":")
-			if serviceName == "web" || serviceName == "django" || serviceName == "app" || serviceName == "backend" {
-				return serviceName
-			}
-		}
-	}
-
-	// Second pass: look for manage.py or python in a service command and find the closest service
-	for idx, line := range lines {
-		if strings.Contains(line, "manage.py") || (strings.Contains(line, "command:") && strings.Contains(line, "python")) {
-			// search upward for a service name
-			for i := idx; i >= 0; i-- {
-				if strings.HasSuffix(strings.TrimSpace(lines[i]), ":") && !strings.Contains(lines[i], "#") && !strings.Contains(lines[i], "services:") {
-					return strings.TrimSuffix(strings.TrimSpace(lines[i]), ":")
-				}
-			}
-		}
-	}
-
-	// Default fallback
-	return "web"
+	return candidates[0]
 }
 
 // findSettingsModule recursively searches for Django settings module

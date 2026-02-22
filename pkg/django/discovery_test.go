@@ -1,6 +1,7 @@
 package django
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -227,6 +228,95 @@ func TestDiscoverProject(t *testing.T) {
 
 	if project.ManagePyPath != managePyPath {
 		t.Errorf("Expected ManagePyPath to be %s, got %s", managePyPath, project.ManagePyPath)
+	}
+}
+
+func TestDiscoverProjectWithOptionsFast(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	managePyPath := filepath.Join(tmpDir, "manage.py")
+	if err := os.WriteFile(managePyPath, []byte("#!/usr/bin/env python\nimport sys"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	appDir := filepath.Join(tmpDir, "blog")
+	if err := os.MkdirAll(appDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "models.py"), []byte("from django.db import models\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	project, err := DiscoverProjectWithOptions(tmpDir, DiscoverOptions{DeepScan: false})
+	if err != nil {
+		t.Fatalf("DiscoverProjectWithOptions failed: %v", err)
+	}
+
+	if project == nil {
+		t.Fatal("DiscoverProjectWithOptions returned nil")
+	}
+	if project.ManagePyPath != managePyPath {
+		t.Errorf("Expected ManagePyPath to be %s, got %s", managePyPath, project.ManagePyPath)
+	}
+	if len(project.Models) != 0 {
+		t.Fatalf("expected fast discovery to skip model introspection, got %d models", len(project.Models))
+	}
+	if len(project.Migrations) != 0 {
+		t.Fatalf("expected fast discovery to skip migration introspection, got %d migrations", len(project.Migrations))
+	}
+}
+
+func TestFindDjangoServiceCandidatesPrefersAppService(t *testing.T) {
+	tmpDir := t.TempDir()
+	composePath := filepath.Join(tmpDir, "compose.yaml")
+	compose := `x-django-base: &django-base
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  entrypoint: './manage.py runserver 0.0.0.0:80'
+
+services:
+  postgres:
+    image: postgres:16
+  redis:
+    image: redis:7
+  django-app:
+    <<: *django-base
+    environment:
+      DJANGO_SETTINGS_MODULE: sites.app.settings.prod
+  django-worker:
+    <<: *django-base
+    entrypoint: "./manage.py rqworker default"
+`
+	if err := os.WriteFile(composePath, []byte(compose), 0644); err != nil {
+		t.Fatalf("failed to write compose file: %v", err)
+	}
+
+	candidates := findDjangoServiceCandidates(composePath)
+	if len(candidates) == 0 {
+		t.Fatal("expected at least one django service candidate")
+	}
+	if candidates[0] != "django-app" {
+		t.Fatalf("expected django-app as top candidate, got %q (all: %v)", candidates[0], candidates)
+	}
+
+	if got := findDjangoService(composePath); got != "django-app" {
+		t.Fatalf("expected django-app as selected service, got %q", got)
+	}
+}
+
+func TestShouldRetryWithAlternateDockerService(t *testing.T) {
+	err := errors.New("exit status 1")
+	if !shouldRetryWithAlternateDockerService(`service "web" is not running`, err) {
+		t.Fatal("expected retry on service-not-running error")
+	}
+	if !shouldRetryWithAlternateDockerService("OCI runtime exec failed", err) {
+		t.Fatal("expected retry on OCI runtime exec failure")
+	}
+	if shouldRetryWithAlternateDockerService("Traceback (most recent call last):", err) {
+		t.Fatal("did not expect retry on django application traceback")
 	}
 }
 

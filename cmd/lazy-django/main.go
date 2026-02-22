@@ -122,7 +122,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[DEBUG] Working directory: %s\n", startDir)
 	}
 
-	project, err := django.DiscoverProject(startDir)
+	discoveryOpts := django.DiscoverOptions{
+		// Keep normal GUI startup fast; the GUI hydrates deep metadata asynchronously.
+		DeepScan: opts.doctor,
+	}
+	project, err := django.DiscoverProjectWithOptions(startDir, discoveryOpts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		fmt.Fprintln(os.Stderr, "Make sure you're in a Django project directory (with manage.py)")

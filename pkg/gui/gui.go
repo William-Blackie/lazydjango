@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -37,37 +38,43 @@ type Gui struct {
 	stateDirty      bool
 
 	// Global state
-	currentWindow       string
-	mainTitle           string
-	commandHistory      []string
-	favoriteCommands    []string
-	recentModels        []persistedRecentModel
-	recentErrors        []persistedRecentError
-	serverCmd           *exec.Cmd
-	appVersion          string
-	updateChecked       bool
-	updateChecking      bool
-	updateAvailable     bool
-	updateLatestVersion string
-	updateReleaseURL    string
-	updateCheckError    string
-	updateNoticeShown   bool
-	updateCheckStarted  bool
-	outputTab           string // currently selected output tab ID
-	outputTabs          map[string]*outputTabState
-	outputOrder         []string
-	outputRoutes        map[string]string // logical route (command/logs) -> tab ID
-	outputCounter       int
-	outputInputWriters  map[string]io.WriteCloser
-	outputSelectMode    bool
-	outputSelectTabID   string
-	outputSelectAnchor  int
-	outputSelectCursor  int
+	currentWindow           string
+	mainTitle               string
+	commandHistory          []string
+	favoriteCommands        []string
+	recentModels            []persistedRecentModel
+	recentErrors            []persistedRecentError
+	serverCmd               *exec.Cmd
+	appVersion              string
+	updateChecked           bool
+	updateChecking          bool
+	updateAvailable         bool
+	updateLatestVersion     string
+	updateReleaseURL        string
+	updateCheckError        string
+	updateNoticeShown       bool
+	updateCheckStarted      bool
+	startupHydrationStarted bool
+	startupHydrationDone    bool
+	outputTab               string // currently selected output tab ID
+	outputTabs              map[string]*outputTabState
+	outputOrder             []string
+	outputRoutes            map[string]string // logical route (command/logs) -> tab ID
+	outputCounter           int
+	outputInputWriters      map[string]io.WriteCloser
+	outputSelectMode        bool
+	outputSelectTabID       string
+	outputSelectAnchor      int
+	outputSelectCursor      int
 
 	// Selection state for left panels
 	menuSelection int
 	listSelection int
 	dataSelection int
+	menuOriginY   int
+	listOriginY   int
+	dataOriginY   int
+	modelOriginY  int
 
 	// Cached left-panel metadata
 	snapshotCache     []*django.Snapshot
@@ -126,6 +133,7 @@ const (
 	DataWindow       = "data"
 	MainWindow       = "main"
 	OptionsWindow    = "options"
+	FooterWindow     = "footer"
 	ModalWindow      = "modal"
 	ModalInputWindow = "modalInput"
 )
@@ -229,9 +237,7 @@ func (gui *Gui) projectActions() []projectAction {
 		actions = append(actions, projectAction{label: "Containers...", internal: "opencontainers"})
 	}
 
-	if len(gui.projectTaskActions()) > 0 {
-		actions = append(actions, projectAction{label: "Project Tasks...", internal: "openprojecttasks"})
-	}
+	actions = append(actions, projectAction{label: "Project Tasks...", internal: "openprojecttasks"})
 	if len(gui.projectFavoriteActions()) > 0 {
 		actions = append(actions, projectAction{label: "Favorites...", internal: "openfavorites"})
 	}
@@ -447,6 +453,42 @@ func (gui *Gui) clampSelections() {
 	gui.dataSelection = clampSelection(gui.dataSelection, gui.selectionCount(DataWindow))
 }
 
+func keepSelectionVisible(v *gocui.View, selectedLine int, originY *int) {
+	if v == nil || originY == nil {
+		return
+	}
+	if *originY < 0 {
+		*originY = 0
+	}
+
+	origin := *originY
+	if _, oy := v.Origin(); oy >= 0 {
+		origin = oy
+	}
+
+	if selectedLine >= 0 {
+		_, h := v.Size()
+		visible := h
+		if visible < 1 {
+			visible = 1
+		}
+		if selectedLine < origin {
+			origin = selectedLine
+		}
+		if selectedLine >= origin+visible {
+			origin = selectedLine - visible + 1
+		}
+	} else {
+		origin = 0
+	}
+
+	if origin < 0 {
+		origin = 0
+	}
+	*originY = origin
+	_ = v.SetOrigin(0, origin)
+}
+
 func (gui *Gui) rowCursor(windowName string, row int) string {
 	if gui.currentWindow == windowName && !gui.isModalOpen && gui.selectionFor(windowName) == row {
 		return "> "
@@ -533,6 +575,8 @@ func stripANSI(s string) string {
 
 var ansiControlPattern = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-Z\\-_])`)
 
+var interactivePromptPattern = regexp.MustCompile(`(?i)^(email address|username|password|confirm password|new password|old password|enter .+):\s*$`)
+
 func sanitizeOutputForDisplay(text string) string {
 	if text == "" {
 		return ""
@@ -603,12 +647,20 @@ func isProjectTasksModalTitle(title string) bool {
 	return strings.EqualFold(strings.TrimSpace(title), "Project Tasks")
 }
 
-func (gui *Gui) hasMakefile() bool {
-	if gui.project == nil || gui.project.RootDir == "" {
+func hasMakefileAtRoot(rootDir string) bool {
+	rootDir = strings.TrimSpace(rootDir)
+	if rootDir == "" {
 		return false
 	}
-	_, err := os.Stat(fmt.Sprintf("%s/Makefile", gui.project.RootDir))
+	_, err := os.Stat(filepath.Join(rootDir, "Makefile"))
 	return err == nil
+}
+
+func (gui *Gui) hasMakefile() bool {
+	if gui.project == nil {
+		return false
+	}
+	return hasMakefileAtRoot(gui.project.RootDir)
 }
 
 func parseMakeHelpOutput(output string) []makeTarget {
@@ -644,33 +696,30 @@ func parseMakeHelpOutput(output string) []makeTarget {
 	return targets
 }
 
+func loadMakeTargetsForProject(project *django.Project) ([]makeTarget, error) {
+	if project == nil || !hasMakefileAtRoot(project.RootDir) {
+		return nil, nil
+	}
+
+	cmd := exec.Command("make", "help")
+	cmd.Dir = project.RootDir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("make help failed: %w", err)
+	}
+	return parseMakeHelpOutput(string(output)), nil
+}
+
 func (gui *Gui) loadMakeTargets(force bool) ([]makeTarget, error) {
 	if gui.makeTargetsLoaded && !force {
 		return gui.makeTargets, gui.makeTargetsErr
 	}
 
-	if !gui.hasMakefile() {
-		gui.makeTargetsLoaded = true
-		gui.makeTargets = nil
-		gui.makeTargetsErr = nil
-		return nil, nil
-	}
-
-	cmd := exec.Command("make", "help")
-	cmd.Dir = gui.project.RootDir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		gui.makeTargetsLoaded = true
-		gui.makeTargets = nil
-		gui.makeTargetsErr = fmt.Errorf("make help failed: %w", err)
-		return nil, gui.makeTargetsErr
-	}
-
-	targets := parseMakeHelpOutput(string(output))
+	targets, err := loadMakeTargetsForProject(gui.project)
 	gui.makeTargetsLoaded = true
 	gui.makeTargets = targets
-	gui.makeTargetsErr = nil
-	return targets, nil
+	gui.makeTargetsErr = err
+	return targets, err
 }
 
 func (gui *Gui) makeTargetByName(name string) (makeTarget, bool) {
@@ -769,12 +818,6 @@ func NewGui(project *django.Project) (*Gui, error) {
 		return nil, err
 	}
 
-	gui.project.DiscoverSettings()
-	gui.project.DiscoverModels()
-	gui.project.DiscoverMigrations()
-	gui.loadMakeTargets(false)
-	gui.loadProjectTasks(false)
-	gui.refreshContainerStatus()
 	if err := gui.loadProjectState(); err != nil {
 		log.Printf("warning: failed to load project state: %v", err)
 	}
@@ -809,9 +852,9 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 		leftWidth = maxX - 20
 	}
 
-	contentBottom := maxY - 3
+	contentBottom := maxY - 5
 	if contentBottom < 6 {
-		contentBottom = maxY - 1
+		contentBottom = maxY - 3
 	}
 
 	panel1Bottom := contentBottom / 3
@@ -861,15 +904,25 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 	}
 	gui.stylePanelView(mainView, MainWindow)
 
-	optionsView, err := g.SetView(OptionsWindow, 0, maxY-2, maxX-1, maxY-1, 0)
+	optionsView, err := g.SetView(OptionsWindow, 0, maxY-4, maxX-1, maxY-3, 0)
 	if err != nil && err != gocui.ErrUnknownView {
 		return err
 	}
 	optionsView.Frame = false
 	gui.updateOptionsView(optionsView)
 
+	footerView, err := g.SetView(FooterWindow, 0, maxY-2, maxX-1, maxY-1, 0)
+	if err != nil && err != gocui.ErrUnknownView {
+		return err
+	}
+	footerView.Frame = false
+	gui.updateFooterView(footerView)
+
 	if !gui.updateCheckStarted {
 		gui.startUpdateCheck()
+	}
+	if !gui.startupHydrationStarted {
+		gui.startStartupHydration()
 	}
 
 	if gui.isModalOpen {
@@ -895,6 +948,16 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 		modalView.TitleColor = panelTitleColorActive
 		gui.renderModal(modalView)
 		gui.setModalKeybindings()
+
+		// Preserve modal input focus when editing a field/picker.
+		if inputView, viewErr := g.View(ModalInputWindow); viewErr == nil && inputView != nil {
+			g.SetViewOnTop(ModalWindow)
+			g.SetViewOnTop(ModalInputWindow)
+			if _, err := g.SetCurrentView(ModalInputWindow); err != nil {
+				return err
+			}
+			return nil
+		}
 
 		if _, err := g.SetCurrentView(ModalWindow); err != nil {
 			return err
@@ -1055,6 +1118,91 @@ func (gui *Gui) startUpdateCheck() {
 	}()
 }
 
+func cloneProjectForDiscovery(project *django.Project) *django.Project {
+	if project == nil {
+		return nil
+	}
+
+	clone := *project
+	clone.Apps = append([]django.App(nil), project.Apps...)
+	for i := range clone.Apps {
+		clone.Apps[i].Models = append([]django.Model(nil), project.Apps[i].Models...)
+	}
+	clone.Models = append([]django.Model(nil), project.Models...)
+	clone.Migrations = append([]django.Migration(nil), project.Migrations...)
+	clone.InstalledApps = append([]string(nil), project.InstalledApps...)
+	clone.Middleware = append([]string(nil), project.Middleware...)
+	return &clone
+}
+
+func (gui *Gui) applyDiscoveredProjectMetadata(discovered *django.Project) {
+	if gui.project == nil || discovered == nil {
+		return
+	}
+	gui.project.SettingsModule = discovered.SettingsModule
+	gui.project.Database = discovered.Database
+	gui.project.Apps = discovered.Apps
+	gui.project.Models = discovered.Models
+	gui.project.Migrations = discovered.Migrations
+	gui.project.InstalledApps = discovered.InstalledApps
+	gui.project.Middleware = discovered.Middleware
+}
+
+func (gui *Gui) startStartupHydration() {
+	if gui.startupHydrationStarted {
+		return
+	}
+	gui.startupHydrationStarted = true
+	if gui.project == nil {
+		gui.startupHydrationDone = true
+		return
+	}
+
+	projectCopy := cloneProjectForDiscovery(gui.project)
+	if projectCopy == nil {
+		gui.startupHydrationDone = true
+		return
+	}
+
+	go func(discoveryProject *django.Project) {
+		discoveryProject.DiscoverSettings()
+		discoveryProject.DiscoverModels()
+		discoveryProject.DiscoverMigrations()
+		makeTargets, makeTargetsErr := loadMakeTargetsForProject(discoveryProject)
+		containerStatus := getContainerStatusForProject(discoveryProject)
+
+		gui.g.Update(func(g *gocui.Gui) error {
+			gui.applyDiscoveredProjectMetadata(discoveryProject)
+			gui.makeTargetsLoaded = true
+			gui.makeTargets = makeTargets
+			gui.makeTargetsErr = makeTargetsErr
+			gui.containerStatus = containerStatus
+			if _, err := gui.loadProjectTasks(false); err != nil {
+				log.Printf("warning: failed to load project tasks: %v", err)
+			}
+			gui.startupHydrationDone = true
+			gui.clampSelections()
+
+			if menuView, err := g.View(MenuWindow); err == nil {
+				gui.renderProjectList(menuView)
+			}
+			if listView, err := g.View(ListWindow); err == nil {
+				gui.renderDatabaseList(listView)
+			}
+			if dataView, err := g.View(DataWindow); err == nil {
+				gui.renderDataList(dataView)
+			}
+			if mainView, err := g.View(MainWindow); err == nil && gui.currentModel == "" {
+				gui.renderOutputView(mainView)
+			}
+			if optionsView, err := g.View(OptionsWindow); err == nil {
+				gui.updateOptionsView(optionsView)
+			}
+			return nil
+		})
+	}(projectCopy)
+}
+
 func isOutputRoute(tab string) bool {
 	return tab == OutputTabCommand || tab == OutputTabLogs
 }
@@ -1074,6 +1222,13 @@ func outputDefaultTitle(route string) string {
 		return "Command"
 	}
 	return "Output"
+}
+
+func outputFollowLabel(following bool) string {
+	if following {
+		return "tail"
+	}
+	return "hold"
 }
 
 func tabTitleFromCommand(command string) string {
@@ -1260,6 +1415,54 @@ func (gui *Gui) outputTitleForTab(tab string) string {
 	return title
 }
 
+func (gui *Gui) outputTabFollowsLatest(tabID string) bool {
+	tab, ok := gui.outputTabs[tabID]
+	if !ok {
+		return false
+	}
+	return tab.autoscroll || tab.originY == outputOriginTail
+}
+
+func (gui *Gui) freezeOutputTabAtCurrentPosition(tabID string) {
+	tab, ok := gui.outputTabs[tabID]
+	if !ok {
+		return
+	}
+
+	lines := outputLines(gui.outputTextForTab(tabID))
+	if len(lines) == 0 {
+		tab.autoscroll = false
+		tab.originX = 0
+		tab.originY = 0
+		return
+	}
+
+	originX, originY := 0, 0
+	if gui.g != nil {
+		if v, err := gui.g.View(MainWindow); err == nil && v != nil {
+			if ox, oy := v.Origin(); oy >= 0 {
+				originX = ox
+				originY = oy
+			}
+			if gui.outputTabFollowsLatest(tabID) {
+				_, h := v.Size()
+				visible := h - 2
+				if visible < 1 {
+					visible = 1
+				}
+				originY = len(lines) - visible
+				if originY < 0 {
+					originY = 0
+				}
+			}
+		}
+	}
+
+	tab.autoscroll = false
+	tab.originX = originX
+	tab.originY = clampSelection(originY, len(lines))
+}
+
 func (gui *Gui) outputTextForTab(tab string) string {
 	id := gui.resolveOutputTabID(tab, false)
 	if id == "" {
@@ -1361,6 +1564,9 @@ func (gui *Gui) renderOutputView(v *gocui.View) {
 		if gui.project != nil {
 			fmt.Fprintf(v, "Project: %s\n", gui.project.RootDir)
 			fmt.Fprintf(v, "Apps: %d  Models: %d  Database: %s\n", len(gui.project.InstalledApps), len(gui.project.Models), gui.databaseLabel())
+			if !gui.startupHydrationDone {
+				fmt.Fprintln(v, "Metadata: loading...")
+			}
 			if gui.project.HasDocker {
 				fmt.Fprintln(v, "Docker: configured")
 			} else {
@@ -1371,8 +1577,12 @@ func (gui *Gui) renderOutputView(v *gocui.View) {
 			} else {
 				fmt.Fprintln(v, "Workflow: django")
 			}
-			if tasks, err := gui.loadProjectTasks(false); err == nil {
-				fmt.Fprintf(v, "Project tasks: %d\n", len(tasks))
+			if !gui.projectTasksReady {
+				fmt.Fprintln(v, "Project tasks: loading...")
+			} else if gui.projectTasksErr != nil {
+				fmt.Fprintln(v, "Project tasks: error")
+			} else {
+				fmt.Fprintf(v, "Project tasks: %d\n", len(gui.projectTasks))
 			}
 		}
 		fmt.Fprintln(v)
@@ -1383,7 +1593,7 @@ func (gui *Gui) renderOutputView(v *gocui.View) {
 		fmt.Fprintln(v, "  4. Press : to run ad-hoc commands, / to search current view")
 		fmt.Fprintln(v)
 		fmt.Fprintln(v, "Output tabs are created automatically when commands run.")
-		fmt.Fprintln(v, "Keys: [ previous, ] next, o toggle cmd/log, x close tab, Ctrl+L clear tab, g/G jump, Ctrl+d/u page.")
+		fmt.Fprintln(v, "Keys: [ previous, ] next, o toggle cmd/log, f tail/hold, x close tab, Ctrl+L clear tab, g/G jump, Ctrl+d/u page.")
 		return
 	}
 
@@ -1392,11 +1602,12 @@ func (gui *Gui) renderOutputView(v *gocui.View) {
 		gui.outputSelectMode = false
 		gui.outputSelectTabID = ""
 	}
-	useAutoscroll := tab.autoscroll || tab.originY == outputOriginTail
+	following := gui.outputTabFollowsLatest(tabID)
+	useAutoscroll := following
 	v.Autoscroll = useAutoscroll
 	totalTabs := len(gui.outputOrder)
 	tabIndex := gui.outputTabPosition(tabID) + 1
-	title := fmt.Sprintf("%s [%s %d/%d]", gui.outputTitleForTab(tabID), outputRouteLabel(tab.route), tabIndex, totalTabs)
+	title := fmt.Sprintf("%s [%s %d/%d %s]", gui.outputTitleForTab(tabID), outputRouteLabel(tab.route), tabIndex, totalTabs, outputFollowLabel(following))
 	gui.mainTitle = title
 	v.Title = gui.panelTitle(MainWindow, title)
 
@@ -1407,7 +1618,7 @@ func (gui *Gui) renderOutputView(v *gocui.View) {
 		fmt.Fprintln(v, "No output in this tab yet.")
 		fmt.Fprintln(v)
 		fmt.Fprintln(v, "Each command creates a new tab.")
-		fmt.Fprintln(v, "Use [ and ] to switch tabs, x to close, Ctrl+L to clear.")
+		fmt.Fprintln(v, "Use [ and ] to switch tabs, f to toggle tail/hold, x to close, Ctrl+L to clear.")
 		return
 	}
 	lines := outputLines(text)
@@ -1672,19 +1883,23 @@ func (gui *Gui) renderProjectList(v *gocui.View) {
 		serverStatus = "running"
 	}
 
-	fmt.Fprintf(v, "server: %s\n", serverStatus)
-	fmt.Fprintf(v, "database: %s\n", gui.databaseLabel())
+	lines := make([]string, 0, 32)
+	lines = append(lines, fmt.Sprintf("server: %s", serverStatus))
+	lines = append(lines, fmt.Sprintf("database: %s", gui.databaseLabel()))
 	if gui.hasMakefile() {
-		fmt.Fprintln(v, "workflow: make")
+		lines = append(lines, "workflow: make")
 	} else {
-		fmt.Fprintln(v, "workflow: django")
+		lines = append(lines, "workflow: django")
 	}
 	applied, total := gui.migrationSummary()
-	fmt.Fprintf(v, "apps:%d models:%d migrations:%d/%d\n", len(gui.project.InstalledApps), len(gui.project.Models), applied, total)
+	lines = append(lines, fmt.Sprintf("apps:%d models:%d migrations:%d/%d", len(gui.project.InstalledApps), len(gui.project.Models), applied, total))
+	if !gui.startupHydrationDone {
+		lines = append(lines, "metadata: loading...")
+	}
 
 	if gui.project.HasDocker {
 		if len(gui.containerStatus) == 0 {
-			fmt.Fprintln(v, "docker: configured")
+			lines = append(lines, "docker: configured")
 		} else {
 			running := 0
 			for _, state := range gui.containerStatus {
@@ -1692,27 +1907,40 @@ func (gui *Gui) renderProjectList(v *gocui.View) {
 					running++
 				}
 			}
-			fmt.Fprintf(v, "docker: %d/%d running\n", running, len(gui.containerStatus))
+			lines = append(lines, fmt.Sprintf("docker: %d/%d running", running, len(gui.containerStatus)))
 		}
 	} else {
-		fmt.Fprintln(v, "docker: not configured")
+		lines = append(lines, "docker: not configured")
 	}
-	fmt.Fprintf(v, "update: %s\n", gui.updateStatusLine())
-	fmt.Fprintf(v, "history: cmd:%d model:%d err:%d\n", len(gui.commandHistory), len(gui.recentModels), len(gui.recentErrors))
+	lines = append(lines, fmt.Sprintf("update: %s", gui.updateStatusLine()))
+	lines = append(lines, fmt.Sprintf("history: cmd:%d model:%d err:%d", len(gui.commandHistory), len(gui.recentModels), len(gui.recentErrors)))
 	if strings.TrimSpace(gui.historyStoreErr) != "" {
-		fmt.Fprintln(v, "history-log: write error")
+		lines = append(lines, "history-log: write error")
 	}
-	tasks, tasksErr := gui.loadProjectTasks(false)
-	if tasksErr != nil {
-		fmt.Fprintln(v, "tasks: error")
+	if !gui.projectTasksReady {
+		lines = append(lines, "tasks: loading...")
+	} else if gui.projectTasksErr != nil {
+		lines = append(lines, "tasks: error")
 	} else {
-		fmt.Fprintf(v, "tasks: %d\n", len(tasks))
+		lines = append(lines, fmt.Sprintf("tasks: %d", len(gui.projectTasks)))
 	}
 
-	fmt.Fprintln(v, "")
-	for i, action := range gui.projectActions() {
-		fmt.Fprintf(v, "%s%s\n", gui.rowCursor(MenuWindow, i), action.label)
+	lines = append(lines, "")
+	actions := gui.projectActions()
+	actionsStartLine := len(lines)
+	for i, action := range actions {
+		lines = append(lines, fmt.Sprintf("%s%s", gui.rowCursor(MenuWindow, i), action.label))
 	}
+
+	for _, line := range lines {
+		fmt.Fprintln(v, line)
+	}
+
+	selectedLine := -1
+	if len(actions) > 0 {
+		selectedLine = actionsStartLine + clampSelection(gui.menuSelection, len(actions))
+	}
+	keepSelectionVisible(v, selectedLine, &gui.menuOriginY)
 }
 
 func (gui *Gui) renderDatabaseList(v *gocui.View) {
@@ -1720,18 +1948,38 @@ func (gui *Gui) renderDatabaseList(v *gocui.View) {
 	gui.clampSelections()
 
 	models := gui.sortedModels()
-	fmt.Fprintf(v, "models: %d\n", len(models))
-	fmt.Fprintln(v, "")
+	lines := make([]string, 0, len(models)+4)
+	lines = append(lines, fmt.Sprintf("models: %d", len(models)))
+	lines = append(lines, "")
 
 	if len(models) == 0 {
-		fmt.Fprintln(v, "No models discovered")
+		if !gui.startupHydrationDone {
+			lines = append(lines, "Discovering models...")
+			for _, line := range lines {
+				fmt.Fprintln(v, line)
+			}
+			keepSelectionVisible(v, -1, &gui.listOriginY)
+			return
+		}
+		lines = append(lines, "No models discovered")
+		for _, line := range lines {
+			fmt.Fprintln(v, line)
+		}
+		keepSelectionVisible(v, -1, &gui.listOriginY)
 		return
 	}
 
+	startLine := len(lines)
 	for i, model := range models {
 		label := fmt.Sprintf("%s.%s (%d fields)", model.App, model.Name, model.Fields)
-		fmt.Fprintf(v, "%s%s\n", gui.rowCursor(ListWindow, i), label)
+		lines = append(lines, fmt.Sprintf("%s%s", gui.rowCursor(ListWindow, i), label))
 	}
+
+	for _, line := range lines {
+		fmt.Fprintln(v, line)
+	}
+	selectedLine := startLine + clampSelection(gui.listSelection, len(models))
+	keepSelectionVisible(v, selectedLine, &gui.listOriginY)
 }
 
 func (gui *Gui) loadSnapshots(force bool) ([]*django.Snapshot, error) {
@@ -1757,20 +2005,31 @@ func (gui *Gui) renderDataList(v *gocui.View) {
 	v.Clear()
 	gui.clampSelections()
 
+	lines := make([]string, 0, 16)
 	snapshots, err := gui.loadSnapshots(false)
 	if err != nil {
-		fmt.Fprintf(v, "snapshots: error (%v)\n", err)
+		lines = append(lines, fmt.Sprintf("snapshots: error (%v)", err))
 	} else {
-		fmt.Fprintf(v, "snapshots: %d\n", len(snapshots))
+		lines = append(lines, fmt.Sprintf("snapshots: %d", len(snapshots)))
 		if len(snapshots) > 0 {
-			fmt.Fprintf(v, "latest: %s\n", snapshots[0].Name)
+			lines = append(lines, fmt.Sprintf("latest: %s", snapshots[0].Name))
 		}
 	}
 
-	fmt.Fprintln(v, "")
-	for i, action := range gui.dataActions() {
-		fmt.Fprintf(v, "%s%s\n", gui.rowCursor(DataWindow, i), action)
+	lines = append(lines, "")
+	actions := gui.dataActions()
+	startLine := len(lines)
+	for i, action := range actions {
+		lines = append(lines, fmt.Sprintf("%s%s", gui.rowCursor(DataWindow, i), action))
 	}
+	for _, line := range lines {
+		fmt.Fprintln(v, line)
+	}
+	selectedLine := -1
+	if len(actions) > 0 {
+		selectedLine = startLine + clampSelection(gui.dataSelection, len(actions))
+	}
+	keepSelectionVisible(v, selectedLine, &gui.dataOriginY)
 }
 
 func (gui *Gui) updateOptionsView(v *gocui.View) {
@@ -1800,7 +2059,7 @@ func (gui *Gui) updateOptionsView(v *gocui.View) {
 		return
 	}
 	if gui.inputMode == "output-input" {
-		fmt.Fprint(v, "Process input | Type input for running command  Enter:send  Esc:cancel")
+		fmt.Fprint(v, "Process input | Type input for running command  Enter:send (keep open)  Esc:close")
 		return
 	}
 
@@ -1821,7 +2080,7 @@ func (gui *Gui) updateOptionsView(v *gocui.View) {
 			if gui.outputSelectMode {
 				context = fmt.Sprintf("Output(%s) select | j/k:extend  g/G:top/bottom  y:copy selected lines  v/Esc:exit select  [ ]:tabs  x:close", gui.currentOutputTabLabel())
 			} else {
-				context = fmt.Sprintf("Output(%s) | t:picker  [ ]:tabs  o:other type  x:close  Ctrl+L:clear  j/k/Ctrl+d/u:scroll  g/G:top/bottom  v:select  y:copy line  i:send input", gui.currentOutputTabLabel())
+				context = fmt.Sprintf("Output(%s) | t:picker  [ ]:tabs  o:other type  f:tail/hold  x:close  Ctrl+L:clear  j/k/Ctrl+d/u:scroll  g/G:top/bottom  v:select  y:copy line  i:send input", gui.currentOutputTabLabel())
 			}
 		}
 	default:
@@ -1829,6 +2088,11 @@ func (gui *Gui) updateOptionsView(v *gocui.View) {
 	}
 
 	fmt.Fprintf(v, "%s\n%s", global, context)
+}
+
+func (gui *Gui) updateFooterView(v *gocui.View) {
+	v.Clear()
+	fmt.Fprint(v, "Beta: LazyDjango is in active beta. Report issues: https://github.com/William-Blackie/lazydjango/issues")
 }
 
 func (gui *Gui) editableInputViewFocused(v *gocui.View) bool {
@@ -2013,6 +2277,9 @@ func (gui *Gui) setKeybindings() error {
 		return err
 	}
 	if err := gui.bindGlobalRuneKey('o', gui.toggleOutputTab); err != nil {
+		return err
+	}
+	if err := gui.bindGlobalRuneKey('f', gui.toggleOutputFollow); err != nil {
 		return err
 	}
 	if err := gui.bindGlobalRuneKey('i', gui.openOutputInputBar); err != nil {
@@ -2424,7 +2691,21 @@ func (gui *Gui) submitInputBar(g *gocui.Gui, v *gocui.View) error {
 	if v != nil {
 		raw = strings.TrimRight(v.Buffer(), "\r\n")
 	}
+
 	mode := gui.inputMode
+	if mode == "output-input" {
+		if err := gui.sendOutputInput(raw); err != nil {
+			_ = gui.closeInputBar()
+			return nil
+		}
+		if v != nil {
+			v.Clear()
+			_ = v.SetCursor(0, 0)
+			_ = v.SetOrigin(0, 0)
+		}
+		return nil
+	}
+
 	if err := gui.closeInputBar(); err != nil {
 		return err
 	}
@@ -2442,9 +2723,6 @@ func (gui *Gui) submitInputBar(g *gocui.Gui, v *gocui.View) error {
 		}
 		return gui.searchCurrentWindow(input)
 	}
-	if mode == "output-input" {
-		return gui.sendOutputInput(raw)
-	}
 	return nil
 }
 
@@ -2459,12 +2737,14 @@ func (gui *Gui) sendOutputInput(input string) error {
 
 	writer, ok := gui.outputInputWriters[tabID]
 	if !ok || writer == nil {
-		return gui.showMessage("Input", "This process is no longer accepting input.")
+		_ = gui.showMessage("Input", "This process is no longer accepting input.")
+		return fmt.Errorf("process input is closed")
 	}
 
 	payload := input + "\n"
 	if _, err := io.WriteString(writer, payload); err != nil {
-		return gui.showMessage("Input", fmt.Sprintf("Failed to send input: %v", err))
+		_ = gui.showMessage("Input", fmt.Sprintf("Failed to send input: %v", err))
+		return err
 	}
 	return nil
 }
@@ -2477,6 +2757,68 @@ func isHelpCommand(input string) bool {
 	default:
 		return false
 	}
+}
+
+func isLikelyInteractiveCommand(command string) bool {
+	command = strings.ToLower(strings.TrimSpace(command))
+	if command == "" {
+		return false
+	}
+
+	hints := []string{
+		"createsuperuser",
+		"changepassword",
+		"manage.py shell",
+		"manage.py dbshell",
+		"python -i",
+		"docker compose exec",
+		"psql",
+		"mysql",
+	}
+	for _, hint := range hints {
+		if strings.Contains(command, hint) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasInteractivePrompt(text string) bool {
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+
+	lines := outputLines(strings.ToLower(text))
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		if line == ">>>" || line == "..." {
+			return true
+		}
+		if interactivePromptPattern.MatchString(line) {
+			return true
+		}
+		return false
+	}
+	return false
+}
+
+func (gui *Gui) maybeAutoFocusOutputInput(tabID string) error {
+	if gui.isModalOpen || gui.inputMode != "" || gui.currentModel != "" {
+		return nil
+	}
+	if gui.currentWindow != MainWindow {
+		return nil
+	}
+	if gui.resolveOutputTabID("", false) != tabID {
+		return nil
+	}
+	if _, ok := gui.outputInputWriters[tabID]; !ok {
+		return nil
+	}
+	return gui.openOutputInputBar(gui.g, nil)
 }
 
 func (gui *Gui) runCommandBarInput(input string) error {
@@ -2532,6 +2874,7 @@ func (gui *Gui) helpContent() string {
 		"  t             Open tab picker",
 		"  [ / ]         Previous/next tab",
 		"  o             Toggle command/logs route",
+		"  f             Toggle tail-follow/hold in current tab",
 		"  x             Close current tab",
 		"  Ctrl+L        Clear current tab",
 		"",
@@ -2818,6 +3161,35 @@ func (gui *Gui) prevOutputTab(g *gocui.Gui, v *gocui.View) error {
 	return gui.switchPanel(MainWindow)
 }
 
+func (gui *Gui) toggleOutputFollow(g *gocui.Gui, v *gocui.View) error {
+	if gui.isModalOpen || gui.currentModel != "" {
+		return nil
+	}
+	if gui.currentWindow != MainWindow {
+		return nil
+	}
+
+	tabID := gui.resolveOutputTabID("", false)
+	if tabID == "" {
+		return nil
+	}
+	tab, ok := gui.outputTabs[tabID]
+	if !ok {
+		return nil
+	}
+
+	if gui.outputTabFollowsLatest(tabID) {
+		gui.freezeOutputTabAtCurrentPosition(tabID)
+	} else {
+		tab.autoscroll = true
+		tab.originX = 0
+		tab.originY = 0
+	}
+	gui.markStateDirty()
+	gui.refreshOutputView()
+	return nil
+}
+
 func (gui *Gui) clearCurrentOutputTab(g *gocui.Gui, v *gocui.View) error {
 	if gui.isModalOpen || gui.currentModel != "" {
 		return nil
@@ -3095,6 +3467,11 @@ func (gui *Gui) runProjectAction(action projectAction) error {
 	case "opencontainers":
 		return gui.openProjectActionsModal("Container Actions", gui.projectContainerActions())
 	case "openprojecttasks":
+		if !gui.projectTasksReady {
+			if _, err := gui.loadProjectTasks(false); err != nil {
+				return gui.showMessage("Project Tasks", fmt.Sprintf("Failed to load project tasks: %v", err))
+			}
+		}
 		return gui.openProjectActionsModal("Project Tasks", gui.projectTaskActions())
 	case "openfavorites":
 		return gui.openProjectActionsModal("Favorite Commands", gui.projectFavoriteActions())
@@ -3330,6 +3707,9 @@ func (gui *Gui) runStreamingCommandToRoute(
 
 	if stdin != nil {
 		gui.outputInputWriters[tabID] = stdin
+		if isLikelyInteractiveCommand(command) {
+			_ = gui.maybeAutoFocusOutputInput(tabID)
+		}
 	}
 
 	if trackAsServer {
@@ -3378,6 +3758,9 @@ func (gui *Gui) runStreamingCommandToRoute(
 			chunkCopy := chunk
 			gui.g.Update(func(g *gocui.Gui) error {
 				gui.appendOutput(tabID, chunkCopy)
+				if hasInteractivePrompt(chunkCopy) {
+					_ = gui.maybeAutoFocusOutputInput(tabID)
+				}
 				gui.refreshOutputView()
 				return nil
 			})
@@ -3530,6 +3913,7 @@ func (gui *Gui) clearModelView() error {
 	gui.currentPage = 1
 	gui.selectedRecordIdx = 0
 	gui.totalRecords = 0
+	gui.modelOriginY = 0
 
 	mainView, err := gui.g.View(MainWindow)
 	if err == nil {
@@ -4138,19 +4522,23 @@ func (gui *Gui) refreshContainerStatus() {
 	gui.containerStatus = gui.getContainerStatus()
 }
 
-func (gui *Gui) getContainerStatus() map[string]string {
-	if gui.project == nil || !gui.project.HasDocker || gui.project.DockerComposeFile == "" {
+func getContainerStatusForProject(project *django.Project) map[string]string {
+	if project == nil || !project.HasDocker || project.DockerComposeFile == "" {
 		return map[string]string{}
 	}
 
-	cmd := exec.Command("docker", "compose", "-f", gui.project.DockerComposeFile, "ps", "--format", "json")
-	cmd.Dir = gui.project.RootDir
+	cmd := exec.Command("docker", "compose", "-f", project.DockerComposeFile, "ps", "--format", "json")
+	cmd.Dir = project.RootDir
 	output, err := cmd.Output()
 	if err != nil {
 		return map[string]string{}
 	}
 
 	return parseComposePSOutput(string(output))
+}
+
+func (gui *Gui) getContainerStatus() map[string]string {
+	return getContainerStatusForProject(gui.project)
 }
 
 func (gui *Gui) startContainers(g *gocui.Gui, v *gocui.View) error {

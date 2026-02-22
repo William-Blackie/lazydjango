@@ -367,7 +367,10 @@ func (gui *Gui) setModalKeybindings() {
 		log.Printf("setModalKeybindings: modalType=%s, numFields=%d", gui.modalType, len(gui.modalFields))
 	}
 	gui.g.DeleteKeybindings(ModalWindow)
-	gui.g.DeleteKeybindings(ModalInputWindow)
+	// Keep ModalInputWindow bindings while an input/picker is open.
+	if _, err := gui.g.View(ModalInputWindow); err != nil {
+		gui.g.DeleteKeybindings(ModalInputWindow)
+	}
 
 	gui.g.SetKeybinding(ModalWindow, gocui.KeyEsc, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
 		return gui.closeModal()

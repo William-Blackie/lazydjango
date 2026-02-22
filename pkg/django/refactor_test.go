@@ -1,6 +1,7 @@
 package django
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -15,14 +16,14 @@ func TestDataViewerHelpers(t *testing.T) {
 			Name:   "db.sqlite3",
 		},
 	}
-	
+
 	dv := NewDataViewer(project)
-	
+
 	// Test that DataViewer is created properly
 	if dv == nil {
 		t.Fatal("NewDataViewer returned nil")
 	}
-	
+
 	if dv.project != project {
 		t.Error("DataViewer project not set correctly")
 	}
@@ -33,13 +34,13 @@ func TestSerializeFieldsCode(t *testing.T) {
 	if serializeFieldsCode == "" {
 		t.Error("serializeFieldsCode is empty")
 	}
-	
-	// Check it contains expected keywords
-	expectedKeywords := []string{"fields", "getattr", "isoformat", "pk"}
+
+	// Check it contains expected keywords.
+	expectedKeywords := []string{"fields", "getattr", "_json_safe"}
 	for _, keyword := range expectedKeywords {
 		found := false
 		for i := 0; i <= len(serializeFieldsCode)-len(keyword); i++ {
-			if i+len(keyword) <= len(serializeFieldsCode) && 
+			if i+len(keyword) <= len(serializeFieldsCode) &&
 				serializeFieldsCode[i:i+len(keyword)] == keyword {
 				found = true
 				break
@@ -48,6 +49,29 @@ func TestSerializeFieldsCode(t *testing.T) {
 		if !found {
 			t.Errorf("serializeFieldsCode missing expected keyword: %s", keyword)
 		}
+	}
+}
+
+func TestSerializeFieldsCodeWithIndent(t *testing.T) {
+	code := serializeFieldsCodeWithIndent(4)
+	lines := strings.Split(code, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected multiline code block, got %q", code)
+	}
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "    ") {
+			t.Fatalf("line missing indentation: %q", line)
+		}
+	}
+}
+
+func TestIndentPythonBlockNegativeSpaces(t *testing.T) {
+	code := indentPythonBlock("x = 1\ny = 2\n", -4)
+	if strings.HasPrefix(code, " ") {
+		t.Fatalf("expected no leading padding for negative spaces, got %q", code)
 	}
 }
 
@@ -63,13 +87,13 @@ func TestSnapshotManagerHelpers(t *testing.T) {
 			User:   "testuser",
 		},
 	}
-	
+
 	sm := NewSnapshotManager(project)
-	
+
 	if sm == nil {
 		t.Fatal("NewSnapshotManager returned nil")
 	}
-	
+
 	if sm.project != project {
 		t.Error("SnapshotManager project not set correctly")
 	}
@@ -80,7 +104,7 @@ func TestDbConfigStructure(t *testing.T) {
 	if len(dbConfigs) == 0 {
 		t.Error("dbConfigs map is empty")
 	}
-	
+
 	// Check PostgreSQL config
 	if pgConfig, ok := dbConfigs["postgresql"]; !ok {
 		t.Error("PostgreSQL config missing")
@@ -92,7 +116,7 @@ func TestDbConfigStructure(t *testing.T) {
 			t.Errorf("Expected psql, got %s", pgConfig.restoreCmd)
 		}
 	}
-	
+
 	// Check MySQL config
 	if mysqlConfig, ok := dbConfigs["mysql"]; !ok {
 		t.Error("MySQL config missing")
@@ -114,19 +138,19 @@ func TestBuildDockerCommand(t *testing.T) {
 		DockerService:     "web",
 		DockerComposeFile: "/tmp/test/compose.yaml",
 	}
-	
+
 	cmd := project.buildDockerCommand("migrate", "--fake")
-	
+
 	if cmd == nil {
 		t.Fatal("buildDockerCommand returned nil")
 	}
-	
+
 	// Verify command structure
 	args := cmd.Args
 	if len(args) == 0 {
 		t.Fatal("Command has no args")
 	}
-	
+
 	// Should contain compose, exec, service name, and our arguments
 	expectedParts := []string{"compose", "exec", "web", "migrate", "--fake"}
 	for _, part := range expectedParts {

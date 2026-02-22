@@ -295,7 +295,10 @@ func (gui *Gui) loadProjectTasks(force bool) ([]projectTaskEntry, error) {
 }
 
 func (gui *Gui) projectTaskActions() []projectAction {
-	tasks, _ := gui.loadProjectTasks(false)
+	if !gui.projectTasksReady {
+		return nil
+	}
+	tasks := gui.projectTasks
 	if len(tasks) == 0 {
 		return nil
 	}

@@ -101,6 +101,7 @@ func (sm *SnapshotManager) CreateSnapshot(name string) (*Snapshot, error) {
 	snapshotFile := filepath.Join(sm.snapshotsDir, fmt.Sprintf("%s%s", snapshot.ID, snapshotFileExtension(engine, djangoFallback)))
 	snapshot.FilePath = snapshotFile
 	snapshot.MetadataPath = filepath.Join(sm.snapshotsDir, fmt.Sprintf("%s.json", snapshot.ID))
+	fallbackFile := filepath.Join(sm.snapshotsDir, fmt.Sprintf("%s.json", snapshot.ID))
 
 	var dumpErr error
 	switch {
@@ -109,12 +110,29 @@ func (sm *SnapshotManager) CreateSnapshot(name string) (*Snapshot, error) {
 			dumpErr = sm.dumpDjangoData(snapshotFile)
 		} else {
 			dumpErr = sm.dumpPostgreSQL(snapshotFile)
+			if dumpErr != nil {
+				// Last-resort fallback keeps snapshots available even when pg_dump fails in containerized setups.
+				if fbErr := sm.dumpDjangoData(fallbackFile); fbErr == nil {
+					dumpErr = nil
+					snapshot.FilePath = fallbackFile
+				} else {
+					dumpErr = fmt.Errorf("postgres dump failed: %v; dumpdata fallback failed: %w", dumpErr, fbErr)
+				}
+			}
 		}
 	case strings.Contains(engine, "mysql"):
 		if djangoFallback {
 			dumpErr = sm.dumpDjangoData(snapshotFile)
 		} else {
 			dumpErr = sm.dumpMySQL(snapshotFile)
+			if dumpErr != nil {
+				if fbErr := sm.dumpDjangoData(fallbackFile); fbErr == nil {
+					dumpErr = nil
+					snapshot.FilePath = fallbackFile
+				} else {
+					dumpErr = fmt.Errorf("mysql dump failed: %v; dumpdata fallback failed: %w", dumpErr, fbErr)
+				}
+			}
 		}
 	case strings.Contains(engine, "sqlite"):
 		dumpErr = sm.dumpSQLite(snapshotFile)
@@ -408,12 +426,28 @@ func (sm *SnapshotManager) restoreSQLite(dumpFile string) error {
 
 // restoreDjangoData restores using Django's loaddata
 func (sm *SnapshotManager) restoreDjangoData(dumpFile string) error {
+	loadPath := dumpFile
+	cleanup := func() {}
+
+	if sm.project != nil && sm.project.HasDocker && sm.project.DockerComposeFile != "" && sm.project.DockerService != "" {
+		tmpPath := fmt.Sprintf("/tmp/lazy-django-%d%s", time.Now().UnixNano(), filepath.Ext(dumpFile))
+		cpCmd := exec.Command("docker", "compose", "-f", sm.project.DockerComposeFile, "cp", dumpFile, fmt.Sprintf("%s:%s", sm.project.DockerService, tmpPath))
+		if output, err := cpCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to copy snapshot into container: %s - %w", strings.TrimSpace(string(output)), err)
+		}
+		loadPath = tmpPath
+		cleanup = func() {
+			_ = exec.Command("docker", "compose", "-f", sm.project.DockerComposeFile, "exec", "-T", sm.project.DockerService, "rm", "-f", tmpPath).Run()
+		}
+	}
+	defer cleanup()
+
 	_, err := sm.project.RunCommand("flush", "--no-input")
 	if err != nil {
 		return fmt.Errorf("flush failed: %w", err)
 	}
 
-	_, err = sm.project.RunCommand("loaddata", dumpFile)
+	_, err = sm.project.RunCommand("loaddata", loadPath)
 	if err != nil {
 		return fmt.Errorf("loaddata failed: %w", err)
 	}
@@ -585,12 +619,94 @@ func (sm *SnapshotManager) getDatabasePassword() string {
 		}
 	}
 
+	// For Docker projects, prefer password values from running database containers.
+	if sm.project != nil && sm.project.HasDocker {
+		if pw := sm.getDatabasePasswordFromContainer(); pw != "" {
+			return pw
+		}
+	}
+
+	// Try compose/.env extracted values.
+	if sm.project != nil && sm.project.DockerComposeFile != "" {
+		env := extractEnvFromCompose(sm.project.DockerComposeFile)
+		for _, key := range []string{"DB_PASSWORD", "POSTGRES_PASSWORD", "MYSQL_PASSWORD"} {
+			if pw := strings.TrimSpace(env[key]); pw != "" {
+				return pw
+			}
+		}
+	}
+
 	// Extract from Django settings
 	cmd := `import json; from django.conf import settings; print(settings.DATABASES['default'].get('PASSWORD', ''))`
 	output, err := sm.project.RunCommand("shell", "-c", cmd)
 	if err == nil {
-		return strings.TrimSpace(output)
+		return lastNonEmptyLine(output)
 	}
 
+	return ""
+}
+
+func (sm *SnapshotManager) getDatabasePasswordFromContainer() string {
+	containers := []string{
+		sm.getPostgresContainerName(),
+		sm.getMySQLContainerName(),
+	}
+
+	for _, container := range containers {
+		container = strings.TrimSpace(container)
+		if container == "" {
+			continue
+		}
+		env := dockerContainerEnv(container)
+		for _, key := range []string{"POSTGRES_PASSWORD", "DB_PASSWORD", "MYSQL_PASSWORD"} {
+			if pw := strings.TrimSpace(env[key]); pw != "" {
+				return pw
+			}
+		}
+	}
+	return ""
+}
+
+func dockerContainerEnv(container string) map[string]string {
+	result := make(map[string]string)
+	container = strings.TrimSpace(container)
+	if container == "" {
+		return result
+	}
+
+	cmd := exec.Command("docker", "exec", container, "env")
+	output, err := cmd.Output()
+	if err != nil {
+		return result
+	}
+
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		idx := strings.Index(line, "=")
+		if idx <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:idx])
+		value := strings.TrimSpace(line[idx+1:])
+		if key == "" {
+			continue
+		}
+		result[key] = value
+	}
+	return result
+}
+
+func lastNonEmptyLine(output string) string {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		return strings.Trim(line, `"'`)
+	}
 	return ""
 }

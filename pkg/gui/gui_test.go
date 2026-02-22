@@ -708,6 +708,65 @@ func TestSendOutputInputWritesLine(t *testing.T) {
 	}
 }
 
+func TestIsLikelyInteractiveCommand(t *testing.T) {
+	tests := []struct {
+		command string
+		want    bool
+	}{
+		{command: "python manage.py createsuperuser", want: true},
+		{command: "python manage.py shell", want: true},
+		{command: "docker compose exec web python manage.py migrate", want: true},
+		{command: "make migrate", want: false},
+	}
+
+	for _, tt := range tests {
+		if got := isLikelyInteractiveCommand(tt.command); got != tt.want {
+			t.Fatalf("isLikelyInteractiveCommand(%q)=%v, want %v", tt.command, got, tt.want)
+		}
+	}
+}
+
+func TestHasInteractivePrompt(t *testing.T) {
+	tests := []struct {
+		text string
+		want bool
+	}{
+		{text: "Email address: ", want: true},
+		{text: "Password: ", want: true},
+		{text: ">>> ", want: true},
+		{text: "Applying migrations... OK", want: false},
+	}
+
+	for _, tt := range tests {
+		if got := hasInteractivePrompt(tt.text); got != tt.want {
+			t.Fatalf("hasInteractivePrompt(%q)=%v, want %v", tt.text, got, tt.want)
+		}
+	}
+}
+
+func TestFreezeOutputTabAtCurrentPosition(t *testing.T) {
+	gui := &Gui{
+		outputTabs: map[string]*outputTabState{
+			"command-001": {
+				id:         "command-001",
+				route:      OutputTabCommand,
+				title:      "Command",
+				text:       "line1\nline2\nline3\nline4",
+				autoscroll: true,
+			},
+		},
+	}
+
+	gui.freezeOutputTabAtCurrentPosition("command-001")
+	tab := gui.outputTabs["command-001"]
+	if tab.autoscroll {
+		t.Fatal("expected autoscroll to be disabled")
+	}
+	if tab.originY < 0 {
+		t.Fatalf("expected non-negative origin, got %d", tab.originY)
+	}
+}
+
 func TestProjectActionsContainCoreItems(t *testing.T) {
 	gui := &Gui{
 		project: &django.Project{},

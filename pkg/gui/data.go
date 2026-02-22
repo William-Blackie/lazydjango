@@ -41,6 +41,8 @@ func (gui *Gui) loadAndDisplayRecords() error {
 	mainView.Clear()
 
 	if len(result.Records) == 0 {
+		gui.modelOriginY = 0
+		keepSelectionVisible(mainView, -1, &gui.modelOriginY)
 		fmt.Fprintln(mainView, "No records found.")
 		fmt.Fprintln(mainView)
 		fmt.Fprintln(mainView, "Press 'a' to create a new record.")
@@ -58,6 +60,10 @@ func (gui *Gui) loadAndDisplayRecords() error {
 	gui.printTableHeader(mainView, fieldNames, colWidths)
 	gui.printTableRows(mainView, result.Records, fieldNames, colWidths)
 	gui.printTableFooter(mainView, result.HasNext)
+
+	// Keep selected row in view while navigating records.
+	selectedLine := 4 + clampSelection(gui.selectedRecordIdx, len(result.Records))
+	keepSelectionVisible(mainView, selectedLine, &gui.modelOriginY)
 
 	return nil
 }
