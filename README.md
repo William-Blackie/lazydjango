@@ -22,7 +22,8 @@ It gives you one place to inspect project state, run common tasks, browse/edit m
 
 ```bash
 brew tap William-Blackie/lazydjango https://github.com/William-Blackie/lazydjango
-brew install William-Blackie/lazydjango/lazy-django
+brew install --formula William-Blackie/lazydjango/lazy-django
+brew upgrade --formula William-Blackie/lazydjango/lazy-django
 ```
 
 ### Build From Source
@@ -205,6 +206,10 @@ go run ./cmd/lazy-django --doctor --doctor-strict --project ./demo-project
 ## Troubleshooting
 
 - `No available formula with the name "lazydjango"`: install with full path `William-Blackie/lazydjango/lazy-django`.
+- Broken tap state or merge conflict in tap files during `brew update`: reset the tap checkout:
+  `brew update-reset william-blackie/lazydjango`
+  If needed, re-tap cleanly:
+  `brew untap william-blackie/lazydjango && brew tap william-blackie/lazydjango https://github.com/William-Blackie/lazydjango`
 - `Repository not found` during tap: use explicit tap URL from install command and ensure repo access.
 - macOS quarantine warning: remove quarantine from the actual Homebrew target binary:
   `BREW_BIN="$(brew --prefix)/bin/lazy-django"; TARGET="$(readlink "$BREW_BIN" 2>/dev/null || echo "$BREW_BIN")"; xattr -dr com.apple.quarantine "$TARGET"`
