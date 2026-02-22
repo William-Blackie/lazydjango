@@ -798,8 +798,6 @@ func (gui *Gui) editModalField() error {
 	v.Title = fmt.Sprintf(" Enter value for: %s ", fieldName)
 	v.Editable = true
 	v.Wrap = false
-	v.BgColor = panelBgColor
-	v.FgColor = panelTextColor
 	v.Clear()
 	fmt.Fprint(v, currentValue)
 	v.SetCursor(len(currentValue), 0)
@@ -863,8 +861,6 @@ func (gui *Gui) showForeignKeyPicker(field map[string]interface{}, fieldName, cu
 
 	v.Title = fmt.Sprintf(" Select %s (FK: %s) ", fieldName, relatedModel)
 	v.Highlight = true
-	v.BgColor = panelBgColor
-	v.FgColor = panelTextColor
 	v.SelBgColor = panelSelectBgColor
 	v.SelFgColor = panelSelectFgColor
 	v.Clear()
@@ -966,8 +962,6 @@ func (gui *Gui) showRegularInput(fieldName, currentValue string) error {
 	v.Title = fmt.Sprintf(" Enter value for: %s ", fieldName)
 	v.Editable = true
 	v.Wrap = false
-	v.BgColor = panelBgColor
-	v.FgColor = panelTextColor
 	v.Clear()
 	fmt.Fprint(v, currentValue)
 	v.SetCursor(len(currentValue), 0)

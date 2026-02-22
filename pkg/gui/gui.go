@@ -137,8 +137,6 @@ const (
 )
 
 const (
-	panelBgColor            = gocui.ColorBlack
-	panelTextColor          = gocui.ColorWhite
 	panelFrameColorInactive = gocui.ColorBlue
 	panelFrameColorActive   = gocui.ColorGreen
 	panelTitleColorInactive = gocui.ColorCyan | gocui.AttrBold
@@ -208,8 +206,6 @@ func (gui *Gui) stylePanelView(v *gocui.View, windowName string) {
 	if v == nil {
 		return
 	}
-	v.BgColor = panelBgColor
-	v.FgColor = panelTextColor
 	isActive := gui.currentWindow == windowName && !gui.isModalOpen && gui.inputMode == ""
 	if isActive {
 		v.FrameColor = panelFrameColorActive
@@ -765,8 +761,7 @@ func NewGui(project *django.Project) (*Gui, error) {
 
 	g.Highlight = false
 	g.Cursor = false
-	g.BgColor = panelBgColor
-	g.FgColor = panelTextColor
+	g.FgColor = gocui.ColorWhite
 	g.SetManagerFunc(gui.layout)
 
 	if err := gui.setKeybindings(); err != nil {
@@ -871,8 +866,6 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 		return err
 	}
 	optionsView.Frame = false
-	optionsView.BgColor = panelBgColor
-	optionsView.FgColor = panelTitleColorInactive
 	gui.updateOptionsView(optionsView)
 
 	if !gui.updateCheckStarted {
@@ -898,8 +891,6 @@ func (gui *Gui) layout(g *gocui.Gui) error {
 		modalView.Title = fmt.Sprintf(" %s ", gui.modalTitle)
 		modalView.Wrap = true
 		modalView.Highlight = false
-		modalView.BgColor = panelBgColor
-		modalView.FgColor = panelTextColor
 		modalView.FrameColor = panelFrameColorActive
 		modalView.TitleColor = panelTitleColorActive
 		gui.renderModal(modalView)
@@ -2331,8 +2322,6 @@ func (gui *Gui) layoutInputPrompt(g *gocui.Gui, maxX, maxY int) error {
 	v.Editable = true
 	v.Wrap = false
 	v.Highlight = false
-	v.BgColor = panelBgColor
-	v.FgColor = panelTextColor
 	v.Title = gui.inputBarTitle()
 	v.FrameColor = panelFrameColorActive
 	v.TitleColor = panelTitleColorActive
