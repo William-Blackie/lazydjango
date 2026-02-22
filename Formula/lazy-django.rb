@@ -5,20 +5,20 @@
 class LazyDjango < Formula
   desc "Keyboard-first TUI for Django workflows."
   homepage "https://github.com/William-Blackie/lazydjango"
-  version "0.0.3"
+  version "0.0.4"
 
   on_macos do
     if Hardware::CPU.intel?
-      url "https://github.com/William-Blackie/lazydjango/releases/download/v0.0.3/lazy-django_0.0.3_darwin_amd64.tar.gz"
-      sha256 "dc17b396633626f1afb8b025b379951018f0d97430ed98ad6532087b4fc3b15e"
+      url "https://github.com/William-Blackie/lazydjango/releases/download/v0.0.4/lazy-django_0.0.4_darwin_amd64.tar.gz"
+      sha256 "d1a4ca0e709dc621bb224176ca6decc096210401bc0b96a4c61daf941274d386"
 
       define_method(:install) do
         bin.install "lazy-django"
       end
     end
     if Hardware::CPU.arm?
-      url "https://github.com/William-Blackie/lazydjango/releases/download/v0.0.3/lazy-django_0.0.3_darwin_arm64.tar.gz"
-      sha256 "c51ad9fb5d587e07a77c0e2df2ccc72adc231dccd702297775e0af97c9dfb761"
+      url "https://github.com/William-Blackie/lazydjango/releases/download/v0.0.4/lazy-django_0.0.4_darwin_arm64.tar.gz"
+      sha256 "9dfc836c19ee2f547f1b6882de1c79ff65a847ba3ce2d6d062937d6370150995"
 
       define_method(:install) do
         bin.install "lazy-django"
@@ -28,15 +28,15 @@ class LazyDjango < Formula
 
   on_linux do
     if Hardware::CPU.intel? && Hardware::CPU.is_64_bit?
-      url "https://github.com/William-Blackie/lazydjango/releases/download/v0.0.3/lazy-django_0.0.3_linux_amd64.tar.gz"
-      sha256 "b0c545a055a9aa1cc29196c14cef690b3b656b9593cd1d9633874a48043cf25e"
+      url "https://github.com/William-Blackie/lazydjango/releases/download/v0.0.4/lazy-django_0.0.4_linux_amd64.tar.gz"
+      sha256 "f3b187ddad3a9b81206b930106e0447494f92b9e45bf5cd1668246fd6d810426"
       define_method(:install) do
         bin.install "lazy-django"
       end
     end
     if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
-      url "https://github.com/William-Blackie/lazydjango/releases/download/v0.0.3/lazy-django_0.0.3_linux_arm64.tar.gz"
-      sha256 "d548f45f6bfb1669fb721bd15c720c610c87150448c153a3f9f19151f4c3f568"
+      url "https://github.com/William-Blackie/lazydjango/releases/download/v0.0.4/lazy-django_0.0.4_linux_arm64.tar.gz"
+      sha256 "02caa6889b12775ef5a69a2b54183a84395e99b292d3da2cc2cc1b47241e40a0"
       define_method(:install) do
         bin.install "lazy-django"
       end
