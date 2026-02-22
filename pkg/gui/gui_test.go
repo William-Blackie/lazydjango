@@ -666,6 +666,15 @@ func TestSanitizeOutputForClipboard(t *testing.T) {
 	}
 }
 
+func TestSanitizeOutputForDisplay(t *testing.T) {
+	input := "\x1b[?25h\x1b[1;A\x1b[0;G\x1b[?25l[+] Running 1/1\r\n"
+	got := sanitizeOutputForDisplay(input)
+	want := "[+] Running 1/1\n"
+	if got != want {
+		t.Fatalf("expected sanitized display output %q, got %q", want, got)
+	}
+}
+
 func TestIsProjectTasksModalTitle(t *testing.T) {
 	if !isProjectTasksModalTitle(" Project Tasks ") {
 		t.Fatal("expected Project Tasks title to match")

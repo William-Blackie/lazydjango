@@ -514,6 +514,28 @@ func stripANSI(s string) string {
 	return ansiEscapePattern.ReplaceAllString(s, "")
 }
 
+var ansiControlPattern = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-Z\\-_])`)
+
+func sanitizeOutputForDisplay(text string) string {
+	if text == "" {
+		return ""
+	}
+	text = ansiControlPattern.ReplaceAllString(text, "")
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	text = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\t':
+			return r
+		case unicode.IsPrint(r):
+			return r
+		default:
+			return -1
+		}
+	}, text)
+	return text
+}
+
 func hasEnvKey(env []string, key string) bool {
 	prefix := key + "="
 	for _, entry := range env {
@@ -3331,6 +3353,10 @@ func (gui *Gui) runStreamingCommandToRoute(
 	go func() {
 		var captured strings.Builder
 		for chunk := range chunkCh {
+			chunk = sanitizeOutputForDisplay(chunk)
+			if chunk == "" {
+				continue
+			}
 			captured.WriteString(chunk)
 			chunkCopy := chunk
 			gui.g.Update(func(g *gocui.Gui) error {
