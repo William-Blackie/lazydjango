@@ -1,0 +1,42 @@
+<svg width="1200" height="760" viewBox="0 0 1200 760" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0F172A"/>
+      <stop offset="100%" stop-color="#1E293B"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="760" rx="18" fill="url(#bg)"/>
+  <rect x="18" y="18" width="1164" height="724" rx="14" fill="#0B1220" stroke="#334155"/>
+  <rect x="34" y="34" width="358" height="220" rx="8" fill="#111827" stroke="#3B82F6"/>
+  <text x="48" y="62" fill="#93C5FD" font-family="'IBM Plex Mono', monospace" font-size="18">Project</text>
+  <text x="48" y="90" fill="#E2E8F0" font-family="'IBM Plex Mono', monospace" font-size="15">server: running</text>
+  <text x="48" y="114" fill="#E2E8F0" font-family="'IBM Plex Mono', monospace" font-size="15">docker: 6/8 running</text>
+  <text x="48" y="138" fill="#E2E8F0" font-family="'IBM Plex Mono', monospace" font-size="15">tasks: 53</text>
+  <text x="48" y="178" fill="#86EFAC" font-family="'IBM Plex Mono', monospace" font-size="15">&gt; Server...</text>
+  <text x="48" y="202" fill="#CBD5E1" font-family="'IBM Plex Mono', monospace" font-size="15">  Containers...</text>
+  <text x="48" y="226" fill="#CBD5E1" font-family="'IBM Plex Mono', monospace" font-size="15">  Project Tasks...</text>
+
+  <rect x="34" y="268" width="358" height="220" rx="8" fill="#111827" stroke="#22D3EE"/>
+  <text x="48" y="296" fill="#67E8F9" font-family="'IBM Plex Mono', monospace" font-size="18">Database</text>
+  <text x="48" y="332" fill="#86EFAC" font-family="'IBM Plex Mono', monospace" font-size="15">&gt; accounts.User</text>
+  <text x="48" y="356" fill="#E2E8F0" font-family="'IBM Plex Mono', monospace" font-size="15">  blog.Post</text>
+  <text x="48" y="380" fill="#E2E8F0" font-family="'IBM Plex Mono', monospace" font-size="15">  orders.Order</text>
+
+  <rect x="34" y="502" width="358" height="224" rx="8" fill="#111827" stroke="#F59E0B"/>
+  <text x="48" y="530" fill="#FCD34D" font-family="'IBM Plex Mono', monospace" font-size="18">Data</text>
+  <text x="48" y="566" fill="#86EFAC" font-family="'IBM Plex Mono', monospace" font-size="15">&gt; Create snapshot</text>
+  <text x="48" y="590" fill="#E2E8F0" font-family="'IBM Plex Mono', monospace" font-size="15">  List snapshots</text>
+  <text x="48" y="614" fill="#E2E8F0" font-family="'IBM Plex Mono', monospace" font-size="15">  Restore snapshot</text>
+
+  <rect x="410" y="34" width="756" height="692" rx="8" fill="#0F172A" stroke="#22C55E"/>
+  <text x="426" y="62" fill="#86EFAC" font-family="'IBM Plex Mono', monospace" font-size="18">Output [Command 3/9]</text>
+  <text x="426" y="98" fill="#F1F5F9" font-family="'IBM Plex Mono', monospace" font-size="15">$ make migrate</text>
+  <text x="426" y="124" fill="#94A3B8" font-family="'IBM Plex Mono', monospace" font-size="15">Applying auth.0012_alter_user_first_name_max_length... OK</text>
+  <text x="426" y="148" fill="#94A3B8" font-family="'IBM Plex Mono', monospace" font-size="15">Applying wagtailusers.0015_userprofile_keyboard_shortcuts... OK</text>
+  <text x="426" y="172" fill="#94A3B8" font-family="'IBM Plex Mono', monospace" font-size="15">Applying www.0008_featurespage_pricingpage... OK</text>
+  <text x="426" y="208" fill="#86EFAC" font-family="'IBM Plex Mono', monospace" font-size="15">Process exited.</text>
+
+  <rect x="426" y="646" width="724" height="64" rx="8" fill="#111827" stroke="#334155"/>
+  <text x="440" y="672" fill="#93C5FD" font-family="'IBM Plex Mono', monospace" font-size="14">Nav | h/j/k/l • g/G • Ctrl+d/u • : command • / search • t tabs • q quit</text>
+  <text x="440" y="692" fill="#CBD5E1" font-family="'IBM Plex Mono', monospace" font-size="14">Output(Command) | v select  y copy  i send input  [ ] switch tabs</text>
+</svg>
