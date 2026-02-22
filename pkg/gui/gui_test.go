@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/awesome-gocui/gocui"
@@ -525,6 +526,207 @@ func TestModalFieldValidation(t *testing.T) {
 				t.Errorf("Expected validity %v, got %v", tt.valid, isValid)
 			}
 		})
+	}
+}
+
+func TestExtractChoiceOptions(t *testing.T) {
+	gui := &Gui{}
+	field := map[string]interface{}{
+		"name": "status",
+		"type": "CharField",
+		"choices": []interface{}{
+			map[string]interface{}{"value": "draft", "label": "Draft"},
+			map[string]interface{}{"value": "published", "label": "Published"},
+			map[string]interface{}{"value": float64(3), "label": "Archived"},
+		},
+	}
+
+	options := gui.extractChoiceOptions(field)
+	if len(options) != 3 {
+		t.Fatalf("expected 3 options, got %d", len(options))
+	}
+	if options[0].Value != "draft" || options[0].Label != "Draft" {
+		t.Fatalf("unexpected first option: %+v", options[0])
+	}
+	if options[2].Value != "3" {
+		t.Fatalf("expected numeric choice value to normalize to string, got %q", options[2].Value)
+	}
+}
+
+func TestValidateConstrainedFieldsChoices(t *testing.T) {
+	gui := &Gui{
+		modalFields: []map[string]interface{}{
+			{
+				"name": "status",
+				"type": "CharField",
+				"choices": []interface{}{
+					map[string]interface{}{"value": "draft", "label": "Draft"},
+					map[string]interface{}{"value": "published", "label": "Published"},
+				},
+			},
+		},
+		modalValues: map[string]string{"status": "draft"},
+	}
+
+	if err := gui.validateConstrainedFields(); err != nil {
+		t.Fatalf("expected valid choice to pass, got error: %v", err)
+	}
+
+	gui.modalValues["status"] = "invalid"
+	if err := gui.validateConstrainedFields(); err == nil {
+		t.Fatal("expected invalid choice to fail validation")
+	}
+}
+
+func TestValidateConstrainedFieldsForeignKeyWithoutProject(t *testing.T) {
+	gui := &Gui{
+		currentApp: "blog",
+		modalFields: []map[string]interface{}{
+			{
+				"name":          "author",
+				"type":          "ForeignKey",
+				"related_model": "User",
+				"related_app":   "auth",
+			},
+		},
+		modalValues: map[string]string{"author": "1"},
+	}
+
+	err := gui.validateConstrainedFields()
+	if err == nil {
+		t.Fatal("expected missing project context to fail foreign key validation")
+	}
+	if !strings.Contains(err.Error(), "project context missing") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSubmitModalValidationKeepsModalOpen(t *testing.T) {
+	requiredField := map[string]interface{}{
+		"name":  "title",
+		"type":  "CharField",
+		"null":  false,
+		"blank": false,
+	}
+
+	t.Run("add", func(t *testing.T) {
+		gui := &Gui{
+			isModalOpen: true,
+			modalType:   "add",
+			modalFields: []map[string]interface{}{requiredField},
+			modalValues: map[string]string{"title": ""},
+		}
+		if err := gui.submitModal(); err != nil {
+			t.Fatalf("submitModal returned error: %v", err)
+		}
+		if !gui.isModalOpen {
+			t.Fatal("expected modal to remain open on validation error")
+		}
+		if !strings.Contains(gui.modalMessage, "required") {
+			t.Fatalf("expected validation message, got %q", gui.modalMessage)
+		}
+	})
+
+	t.Run("edit", func(t *testing.T) {
+		gui := &Gui{
+			isModalOpen: true,
+			modalType:   "edit",
+			modalFields: []map[string]interface{}{requiredField},
+			modalValues: map[string]string{"title": ""},
+			currentRecords: []django.ModelRecord{
+				{
+					PK:     1,
+					Fields: map[string]interface{}{"title": "old"},
+				},
+			},
+		}
+		if err := gui.submitModal(); err != nil {
+			t.Fatalf("submitModal returned error: %v", err)
+		}
+		if !gui.isModalOpen {
+			t.Fatal("expected modal to remain open on validation error")
+		}
+		if !strings.Contains(gui.modalMessage, "required") {
+			t.Fatalf("expected validation message, got %q", gui.modalMessage)
+		}
+	})
+}
+
+func TestAppendPickerOptionsUnique(t *testing.T) {
+	initial := []pickerOption{
+		{Value: "1", Label: "one"},
+		{Value: "2", Label: "two"},
+	}
+	incoming := []pickerOption{
+		{Value: "2", Label: "two duplicate"},
+		{Value: "3", Label: "three"},
+	}
+	merged := appendPickerOptionsUnique(initial, incoming)
+	if len(merged) != 3 {
+		t.Fatalf("expected 3 merged options, got %d", len(merged))
+	}
+	if merged[2].Value != "3" {
+		t.Fatalf("expected new option value '3', got %q", merged[2].Value)
+	}
+}
+
+func TestValidateModalFieldValues(t *testing.T) {
+	fields := []map[string]interface{}{
+		{
+			"name":  "title",
+			"type":  "CharField",
+			"null":  false,
+			"blank": false,
+		},
+		{
+			"name": "status",
+			"type": "CharField",
+			"choices": []interface{}{
+				map[string]interface{}{"value": "draft", "label": "Draft"},
+				map[string]interface{}{"value": "published", "label": "Published"},
+			},
+		},
+	}
+
+	gui := &Gui{
+		modalFields: fields,
+		modalValues: map[string]string{
+			"title":  "",
+			"status": "draft",
+		},
+	}
+	if err := gui.validateModalFieldValues(); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("expected required-field validation error, got: %v", err)
+	}
+
+	gui.modalValues["title"] = "Hello"
+	gui.modalValues["status"] = "invalid"
+	if err := gui.validateModalFieldValues(); err == nil || !strings.Contains(err.Error(), "must be one of") {
+		t.Fatalf("expected choices validation error, got: %v", err)
+	}
+
+	gui.modalValues["status"] = "published"
+	if err := gui.validateModalFieldValues(); err != nil {
+		t.Fatalf("expected valid values to pass, got: %v", err)
+	}
+}
+
+func TestPickerHelpers(t *testing.T) {
+	options := []pickerOption{
+		{Value: "draft", Label: "Draft"},
+		{Value: "published", Label: "Published"},
+		{Value: "archived", Label: "Archived"},
+	}
+
+	if idx := pickerOptionIndexByValue(options, " published "); idx != 1 {
+		t.Fatalf("expected index 1 for trimmed match, got %d", idx)
+	}
+	if idx := pickerOptionIndexByValue(options, "missing"); idx != -1 {
+		t.Fatalf("expected -1 for missing value, got %d", idx)
+	}
+
+	if got := pickerOptionsSummary(options, 2); got != "Draft, Published, ..." {
+		t.Fatalf("unexpected summary: %q", got)
 	}
 }
 

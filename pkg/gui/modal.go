@@ -131,6 +131,7 @@ func (gui *Gui) openFormModal(modalType string, fields []map[string]interface{},
 	if currentValues != nil {
 		gui.modalValues = currentValues
 	}
+	gui.modalMessage = ""
 
 	if modalType == "add" {
 		gui.modalTitle = fmt.Sprintf("Add %s.%s", gui.currentApp, gui.currentModel)
@@ -359,6 +360,11 @@ func (gui *Gui) renderModal(v *gocui.View) {
 
 	fmt.Fprintln(v, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Fprintln(v, "  * = required field")
+	if gui.modalMessage != "" {
+		fmt.Fprintln(v)
+		fmt.Fprintf(v, "Error: %s\n", gui.modalMessage)
+		fmt.Fprintln(v, "Fix fields and press Ctrl+S to save.")
+	}
 }
 
 // setModalKeybindings sets up keybindings when modal is open
@@ -766,6 +772,119 @@ func (gui *Gui) setModalKeybindings() {
 	}
 }
 
+type pickerOption struct {
+	Value string
+	Label string
+}
+
+func (gui *Gui) extractChoiceOptions(field map[string]interface{}) []pickerOption {
+	choices, ok := field["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return nil
+	}
+
+	options := make([]pickerOption, 0, len(choices))
+	for _, rawChoice := range choices {
+		choiceMap, ok := rawChoice.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		rawValue, ok := choiceMap["value"]
+		if !ok {
+			continue
+		}
+		value := strings.TrimSpace(fmt.Sprintf("%v", rawValue))
+		if rawValue == nil {
+			value = ""
+		}
+
+		label := value
+		if rawLabel, ok := choiceMap["label"]; ok {
+			label = strings.TrimSpace(fmt.Sprintf("%v", rawLabel))
+		}
+		if label == "" && value == "" {
+			label = "<empty>"
+		}
+
+		options = append(options, pickerOption{
+			Value: value,
+			Label: label,
+		})
+	}
+
+	return options
+}
+
+func pickerOptionIndexByValue(options []pickerOption, value string) int {
+	needle := strings.TrimSpace(value)
+	for i, option := range options {
+		if strings.TrimSpace(option.Value) == needle {
+			return i
+		}
+	}
+	return -1
+}
+
+func pickerOptionsContainValue(options []pickerOption, value string) bool {
+	return pickerOptionIndexByValue(options, value) >= 0
+}
+
+func appendPickerOptionsUnique(existing []pickerOption, incoming []pickerOption) []pickerOption {
+	if len(incoming) == 0 {
+		return existing
+	}
+	seen := make(map[string]struct{}, len(existing))
+	for _, option := range existing {
+		seen[option.Value] = struct{}{}
+	}
+	for _, option := range incoming {
+		if _, ok := seen[option.Value]; ok {
+			continue
+		}
+		existing = append(existing, option)
+		seen[option.Value] = struct{}{}
+	}
+	return existing
+}
+
+func pickerOptionsSummary(options []pickerOption, max int) string {
+	if max < 1 {
+		max = 1
+	}
+	labels := make([]string, 0, len(options))
+	for _, option := range options {
+		label := strings.TrimSpace(option.Label)
+		if label == "" {
+			label = strings.TrimSpace(option.Value)
+		}
+		if label == "" {
+			label = "<empty>"
+		}
+		labels = append(labels, label)
+		if len(labels) >= max {
+			break
+		}
+	}
+	if len(labels) == 0 {
+		return ""
+	}
+	if len(options) > max {
+		return strings.Join(labels, ", ") + ", ..."
+	}
+	return strings.Join(labels, ", ")
+}
+
+func (gui *Gui) fieldAllowsEmpty(field map[string]interface{}) bool {
+	if null, ok := field["null"].(bool); ok && null {
+		return true
+	}
+	if blank, ok := field["blank"].(bool); ok && blank {
+		return true
+	}
+	return false
+}
+
 // editModalField opens an input prompt for the current field
 func (gui *Gui) editModalField() error {
 	if os.Getenv("DEBUG") == "1" {
@@ -774,11 +893,17 @@ func (gui *Gui) editModalField() error {
 	if gui.modalFieldIdx >= len(gui.modalFields) {
 		return nil
 	}
+	gui.modalMessage = ""
 
 	field := gui.modalFields[gui.modalFieldIdx]
 	fieldName := field["name"].(string)
 	fieldType := field["type"].(string)
 	currentValue := gui.modalValues[fieldName]
+
+	// Choices should be selected from allowed values only.
+	if choiceOptions := gui.extractChoiceOptions(field); len(choiceOptions) > 0 {
+		return gui.showChoicePicker(field, fieldName, currentValue, choiceOptions)
+	}
 
 	// Check if this is a ForeignKey field - show related records
 	if fieldType == "ForeignKey" {
@@ -812,6 +937,7 @@ func (gui *Gui) editModalField() error {
 	gui.g.SetKeybinding(ModalInputWindow, gocui.KeyEnter, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
 		value := strings.TrimSpace(v.Buffer())
 		gui.modalValues[fieldName] = value
+		gui.modalMessage = ""
 		g.DeleteView(ModalInputWindow)
 		g.SetCurrentView(ModalWindow)
 		return nil
@@ -839,20 +965,131 @@ func (gui *Gui) showForeignKeyPicker(field map[string]interface{}, fieldName, cu
 	if relatedApp == "" {
 		relatedApp = gui.currentApp
 	}
-
-	// Query related model records
-	viewer := django.NewDataViewer(gui.project)
-	result, err := viewer.QueryModel(relatedApp, relatedModel, nil, 1, 50)
-	if err != nil {
-		// If query fails, fallback to regular input
-		return gui.showRegularInput(fieldName, currentValue)
+	if gui.project == nil {
+		gui.modalMessage = fmt.Sprintf("Cannot load related records for %s: project context missing", fieldName)
+		return nil
 	}
 
-	// Display picker modal
+	viewer := django.NewDataViewer(gui.project)
+	pageSize := 100
+	page := 1
+	totalCount := 0
+	hasMore := false
+	seenValues := make(map[string]struct{})
+
+	buildOptions := func(records []django.ModelRecord) []pickerOption {
+		options := make([]pickerOption, 0, len(records))
+		for _, record := range records {
+			pk := strings.TrimSpace(fmt.Sprintf("%v", record.PK))
+			if pk == "" {
+				continue
+			}
+			if _, exists := seenValues[pk]; exists {
+				continue
+			}
+			seenValues[pk] = struct{}{}
+			display := gui.getRecordDisplayString(record)
+			options = append(options, pickerOption{
+				Value: pk,
+				Label: fmt.Sprintf("[%s] %s", pk, display),
+			})
+		}
+		return options
+	}
+
+	queryPage := func(pageNumber int) ([]pickerOption, error) {
+		result, err := viewer.QueryModel(relatedApp, relatedModel, nil, pageNumber, pageSize)
+		if err != nil {
+			return nil, err
+		}
+		if totalCount == 0 {
+			totalCount = result.Total
+		}
+		hasMore = result.HasNext
+		return buildOptions(result.Records), nil
+	}
+
+	options, err := queryPage(page)
+	if err != nil {
+		gui.modalMessage = fmt.Sprintf("Failed to load related records for %s: %v", fieldName, err)
+		return nil
+	}
+	page++
+
+	if currentValue != "" && !pickerOptionsContainValue(options, currentValue) {
+		// Preserve/edit existing FK values even if they are not in the loaded page.
+		if currentRecord, err := viewer.GetRecord(relatedApp, relatedModel, currentValue); err == nil {
+			seenValues[currentValue] = struct{}{}
+			display := gui.getRecordDisplayString(*currentRecord)
+			options = append([]pickerOption{{
+				Value: currentValue,
+				Label: fmt.Sprintf("[%s] %s (current)", currentValue, display),
+			}}, options...)
+		}
+	}
+
+	loadMore := func() ([]pickerOption, bool, error) {
+		if !hasMore {
+			return nil, true, nil
+		}
+		more, err := queryPage(page)
+		if err != nil {
+			return nil, !hasMore, err
+		}
+		page++
+		return more, !hasMore, nil
+	}
+
+	if !hasMore {
+		loadMore = nil
+	}
+
+	return gui.showValuePicker(
+		fieldName,
+		fmt.Sprintf(" Select %s (FK: %s.%s) ", fieldName, relatedApp, relatedModel),
+		options,
+		currentValue,
+		gui.fieldAllowsEmpty(field),
+		totalCount,
+		loadMore,
+	)
+}
+
+func (gui *Gui) showChoicePicker(field map[string]interface{}, fieldName, currentValue string, options []pickerOption) error {
+	return gui.showValuePicker(
+		fieldName,
+		fmt.Sprintf(" Select %s (choices) ", fieldName),
+		options,
+		currentValue,
+		gui.fieldAllowsEmpty(field),
+		len(options),
+		nil,
+	)
+}
+
+func (gui *Gui) showValuePicker(
+	fieldName, title string,
+	options []pickerOption,
+	currentValue string,
+	allowEmpty bool,
+	totalCount int,
+	loadMore func() ([]pickerOption, bool, error),
+) error {
+	allOptions := make([]pickerOption, 0, len(options)+1)
+	if allowEmpty {
+		allOptions = append(allOptions, pickerOption{Value: "", Label: "<empty>"})
+	}
+	allOptions = append(allOptions, options...)
+
+	if len(allOptions) == 0 {
+		gui.modalMessage = fmt.Sprintf("No selectable values found for %s", fieldName)
+		return nil
+	}
+
 	gui.g.DeleteView(ModalInputWindow)
 
 	maxX, maxY := gui.g.Size()
-	pickerWidth := 70
+	pickerWidth := 78
 	pickerHeight := 20
 	x0 := (maxX - pickerWidth) / 2
 	y0 := (maxY - pickerHeight) / 2
@@ -862,87 +1099,390 @@ func (gui *Gui) showForeignKeyPicker(field map[string]interface{}, fieldName, cu
 		return err
 	}
 
-	v.Title = fmt.Sprintf(" Select %s (FK: %s) ", fieldName, relatedModel)
-	v.Highlight = true
-	v.SelBgColor = panelSelectBgColor
-	v.SelFgColor = panelSelectFgColor
-	v.Clear()
+	searchMode := false
+	searchQuery := ""
+	statusMessage := ""
+	hasMore := loadMore != nil
+	filtered := make([]pickerOption, 0, len(allOptions))
+	selected := 0 // selected index inside filtered list
+	offset := 0
 
-	fmt.Fprintln(v, "Available records (select with Enter, or type custom ID):")
-	fmt.Fprintln(v, "────────────────────────────────────────────────────────────────────")
-
-	// Display records with their string representation
-	for _, record := range result.Records {
-		displayStr := gui.getRecordDisplayString(record)
-		fmt.Fprintf(v, "  [%v] %s\n", record.PK, displayStr)
+	filterOptions := func(query string) []pickerOption {
+		query = strings.ToLower(strings.TrimSpace(query))
+		if query == "" {
+			out := make([]pickerOption, len(allOptions))
+			copy(out, allOptions)
+			return out
+		}
+		out := make([]pickerOption, 0, len(allOptions))
+		for _, option := range allOptions {
+			label := strings.ToLower(strings.TrimSpace(option.Label))
+			value := strings.ToLower(strings.TrimSpace(option.Value))
+			if strings.Contains(label, query) || strings.Contains(value, query) {
+				out = append(out, option)
+			}
+		}
+		return out
 	}
 
-	if len(result.Records) == 0 {
-		fmt.Fprintln(v, "  No records found")
+	rebuildFiltered := func(preferredValue string) {
+		filtered = filterOptions(searchQuery)
+		if len(filtered) == 0 {
+			selected = 0
+			offset = 0
+			return
+		}
+		if preferredValue != "" {
+			if idx := pickerOptionIndexByValue(filtered, preferredValue); idx >= 0 {
+				selected = idx
+			}
+		}
+		if selected < 0 {
+			selected = 0
+		}
+		if selected >= len(filtered) {
+			selected = len(filtered) - 1
+		}
 	}
 
-	fmt.Fprintln(v, "────────────────────────────────────────────────────────────────────")
-	fmt.Fprintln(v, "Press number keys to enter ID, Enter to confirm, Esc to cancel")
+	selectedValue := func() string {
+		if len(filtered) == 0 {
+			return ""
+		}
+		if selected < 0 || selected >= len(filtered) {
+			return ""
+		}
+		return filtered[selected].Value
+	}
 
-	// Store related records for selection
-	pickerRecords := result.Records
-	pickerInput := currentValue
+	rebuildFiltered(currentValue)
+
+	render := func() {
+		v.Clear()
+		v.Title = title
+		nullable := "no"
+		if allowEmpty {
+			nullable = "yes"
+		}
+		mode := "nav"
+		if searchMode {
+			mode = "search"
+		}
+		loadedCount := len(allOptions)
+		if allowEmpty && loadedCount > 0 {
+			loadedCount--
+		}
+		loadedLabel := fmt.Sprintf("%d", loadedCount)
+		if totalCount > 0 {
+			loadedLabel = fmt.Sprintf("%d/%d", loadedCount, totalCount)
+		} else if hasMore {
+			loadedLabel = fmt.Sprintf("%d+", loadedCount)
+		}
+		selLabel := "0/0"
+		if len(filtered) > 0 {
+			selLabel = fmt.Sprintf("%d/%d", selected+1, len(filtered))
+		}
+		queryDisplay := searchQuery
+		if searchMode {
+			queryDisplay += "_"
+		}
+
+		hints := []string{"j/k or ↑↓ move", "Enter select", "/ search", "Esc close/search"}
+		if loadMore != nil || hasMore {
+			hints = append(hints, "n load more")
+		}
+		if allowEmpty {
+			hints = append(hints, "x clear")
+		}
+		fmt.Fprintf(v, "Use %s\n", strings.Join(hints, " | "))
+		fmt.Fprintf(v, "Mode:%s  Search:/%s  Selected:%s  Loaded:%s  Nullable:%s\n", mode, queryDisplay, selLabel, loadedLabel, nullable)
+		if value := selectedValue(); value != "" {
+			fmt.Fprintf(v, "Value: %s\n", value)
+		} else {
+			fmt.Fprintln(v, "Value: <empty>")
+		}
+		if statusMessage != "" {
+			fmt.Fprintln(v, statusMessage)
+		}
+		fmt.Fprintln(v, "────────────────────────────────────────────────────────────────────────")
+
+		_, h := v.Size()
+		headerLines := 4
+		if statusMessage != "" {
+			headerLines++
+		}
+		visible := h - headerLines
+		if visible < 1 {
+			visible = 1
+		}
+		if len(filtered) == 0 {
+			fmt.Fprintln(v, "  No matches. Press / to edit search, Backspace to broaden.")
+			return
+		}
+		if selected < offset {
+			offset = selected
+		}
+		if selected >= offset+visible {
+			offset = selected - visible + 1
+		}
+		if offset < 0 {
+			offset = 0
+		}
+		maxOffset := len(filtered) - visible
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		if offset > maxOffset {
+			offset = maxOffset
+		}
+
+		end := offset + visible
+		if end > len(filtered) {
+			end = len(filtered)
+		}
+		for i := offset; i < end; i++ {
+			cursor := "  "
+			if i == selected {
+				cursor = "> "
+			}
+			option := filtered[i]
+			label := strings.TrimSpace(option.Label)
+			if label == "" {
+				label = option.Value
+			}
+			if label != option.Value && option.Value != "" {
+				fmt.Fprintf(v, "%s%s (%s)\n", cursor, label, option.Value)
+			} else {
+				fmt.Fprintf(v, "%s%s\n", cursor, label)
+			}
+		}
+	}
+
+	moveSelection := func(delta int) {
+		if len(filtered) == 0 {
+			selected = 0
+			offset = 0
+			render()
+			return
+		}
+		selected += delta
+		if selected < 0 {
+			selected = 0
+		}
+		if selected >= len(filtered) {
+			selected = len(filtered) - 1
+		}
+		render()
+	}
+
+	appendSearchChar := func(char rune) {
+		if !searchMode {
+			return
+		}
+		statusMessage = ""
+		prev := selectedValue()
+		searchQuery += string(char)
+		rebuildFiltered(prev)
+		render()
+	}
+
+	removeSearchChar := func() {
+		if !searchMode {
+			return
+		}
+		statusMessage = ""
+		prev := selectedValue()
+		runes := []rune(searchQuery)
+		if len(runes) == 0 {
+			return
+		}
+		searchQuery = string(runes[:len(runes)-1])
+		rebuildFiltered(prev)
+		render()
+	}
+
+	loadMoreOptions := func() {
+		if loadMore == nil {
+			statusMessage = "No more records to load."
+			render()
+			return
+		}
+		prev := selectedValue()
+		moreOptions, done, err := loadMore()
+		if err != nil {
+			statusMessage = fmt.Sprintf("Load failed: %v", err)
+			render()
+			return
+		}
+		if done {
+			hasMore = false
+		}
+		if len(moreOptions) > 0 {
+			allOptions = appendPickerOptionsUnique(allOptions, moreOptions)
+			rebuildFiltered(prev)
+			statusMessage = fmt.Sprintf("Loaded %d more record(s).", len(moreOptions))
+		} else if hasMore {
+			statusMessage = "No additional records loaded."
+		} else {
+			statusMessage = "No more records."
+		}
+		render()
+	}
+
+	bindSearchRune := func(char rune) {
+		gui.g.SetKeybinding(ModalInputWindow, char, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+			appendSearchChar(char)
+			return nil
+		})
+	}
+
+	render()
 
 	gui.g.SetCurrentView(ModalInputWindow)
 	gui.g.SetViewOnTop(ModalInputWindow)
 	gui.g.DeleteKeybindings(ModalInputWindow)
 
-	// Number input
-	for i := '0'; i <= '9'; i++ {
-		digit := i
-		gui.g.SetKeybinding(ModalInputWindow, digit, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-			pickerInput += string(digit)
-			v.Title = fmt.Sprintf(" Select %s (FK: %s) - ID: %s ", fieldName, relatedModel, pickerInput)
-			return nil
-		})
-	}
-
-	// Backspace to delete
-	gui.g.SetKeybinding(ModalInputWindow, gocui.KeyBackspace, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-		if len(pickerInput) > 0 {
-			pickerInput = pickerInput[:len(pickerInput)-1]
-		}
-		v.Title = fmt.Sprintf(" Select %s (FK: %s) - ID: %s ", fieldName, relatedModel, pickerInput)
-		return nil
-	})
-
-	// j/k navigation through records
-	pickerIdx := 0
 	gui.g.SetKeybinding(ModalInputWindow, 'j', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-		if pickerIdx < len(pickerRecords)-1 {
-			pickerIdx++
-			pickerInput = fmt.Sprintf("%v", pickerRecords[pickerIdx].PK)
-			v.Title = fmt.Sprintf(" Select %s (FK: %s) - ID: %s ", fieldName, relatedModel, pickerInput)
+		if searchMode {
+			appendSearchChar('j')
+			return nil
 		}
+		moveSelection(1)
 		return nil
 	})
-
+	gui.g.SetKeybinding(ModalInputWindow, gocui.KeyArrowDown, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		moveSelection(1)
+		return nil
+	})
 	gui.g.SetKeybinding(ModalInputWindow, 'k', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-		if pickerIdx > 0 {
-			pickerIdx--
-			pickerInput = fmt.Sprintf("%v", pickerRecords[pickerIdx].PK)
-			v.Title = fmt.Sprintf(" Select %s (FK: %s) - ID: %s ", fieldName, relatedModel, pickerInput)
+		if searchMode {
+			appendSearchChar('k')
+			return nil
+		}
+		moveSelection(-1)
+		return nil
+	})
+	gui.g.SetKeybinding(ModalInputWindow, gocui.KeyArrowUp, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		moveSelection(-1)
+		return nil
+	})
+	gui.g.SetKeybinding(ModalInputWindow, 'g', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		if searchMode {
+			appendSearchChar('g')
+			return nil
+		}
+		if len(filtered) > 0 {
+			selected = 0
+		}
+		render()
+		return nil
+	})
+	gui.g.SetKeybinding(ModalInputWindow, 'G', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		if searchMode {
+			appendSearchChar('G')
+			return nil
+		}
+		if len(filtered) > 0 {
+			selected = len(filtered) - 1
+		}
+		render()
+		return nil
+	})
+	gui.g.SetKeybinding(ModalInputWindow, '/', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		searchMode = true
+		statusMessage = ""
+		render()
+		return nil
+	})
+	gui.g.SetKeybinding(ModalInputWindow, gocui.KeyBackspace, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		removeSearchChar()
+		return nil
+	})
+	gui.g.SetKeybinding(ModalInputWindow, gocui.KeyBackspace2, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		removeSearchChar()
+		return nil
+	})
+	gui.g.SetKeybinding(ModalInputWindow, gocui.KeySpace, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		appendSearchChar(' ')
+		return nil
+	})
+	gui.g.SetKeybinding(ModalInputWindow, 'n', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		if searchMode {
+			appendSearchChar('n')
+			return nil
+		}
+		loadMoreOptions()
+		return nil
+	})
+	gui.g.SetKeybinding(ModalInputWindow, 'x', gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		if searchMode {
+			appendSearchChar('x')
+			return nil
+		}
+		if !allowEmpty {
+			statusMessage = "Field is not nullable."
+			render()
+			return nil
+		}
+		gui.modalValues[fieldName] = ""
+		gui.modalMessage = ""
+		g.DeleteView(ModalInputWindow)
+		g.SetCurrentView(ModalWindow)
+		return nil
+	})
+	gui.g.SetKeybinding(ModalInputWindow, gocui.KeyCtrlU, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		if searchMode {
+			searchQuery = ""
+			statusMessage = ""
+			rebuildFiltered(selectedValue())
+			render()
 		}
 		return nil
 	})
-
 	gui.g.SetKeybinding(ModalInputWindow, gocui.KeyEnter, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
-		gui.modalValues[fieldName] = pickerInput
+		if len(filtered) == 0 {
+			statusMessage = "No matching value selected."
+			render()
+			return nil
+		}
+		gui.modalValues[fieldName] = filtered[selected].Value
+		gui.modalMessage = ""
 		g.DeleteView(ModalInputWindow)
 		g.SetCurrentView(ModalWindow)
 		return nil
 	})
-
 	gui.g.SetKeybinding(ModalInputWindow, gocui.KeyEsc, gocui.ModNone, func(g *gocui.Gui, v *gocui.View) error {
+		if searchMode {
+			preferred := selectedValue()
+			searchMode = false
+			searchQuery = ""
+			statusMessage = ""
+			rebuildFiltered(preferred)
+			render()
+			return nil
+		}
 		g.DeleteView(ModalInputWindow)
 		g.SetCurrentView(ModalWindow)
 		return nil
 	})
+	for r := 'a'; r <= 'z'; r++ {
+		if strings.ContainsRune("jkgnx", r) {
+			continue
+		}
+		bindSearchRune(r)
+	}
+	for r := 'A'; r <= 'Z'; r++ {
+		if strings.ContainsRune("G", r) {
+			continue
+		}
+		bindSearchRune(r)
+	}
+	for r := '0'; r <= '9'; r++ {
+		bindSearchRune(r)
+	}
+	for _, r := range []rune{'-', '_', '.', ':', ',', '@'} {
+		bindSearchRune(r)
+	}
 
 	return nil
 }
@@ -1101,17 +1641,16 @@ func (gui *Gui) submitModal() error {
 
 	switch gui.modalType {
 	case "add":
-		if err := gui.validateRequiredFields(); err != nil {
-			gui.showMessage("Error", err.Error())
-			gui.closeModal()
+		if err := gui.validateModalFieldValues(); err != nil {
+			gui.modalMessage = err.Error()
 			return nil
 		}
+		gui.modalMessage = ""
 
 		fields := gui.convertModalFields()
 		pk, err := viewer.CreateRecord(gui.currentApp, gui.currentModel, fields)
 		if err != nil {
-			gui.showMessage("Error", fmt.Sprintf("Failed to create record: %v", err))
-			gui.closeModal()
+			gui.modalMessage = fmt.Sprintf("Create failed: %v", err)
 			return nil
 		}
 
@@ -1124,14 +1663,18 @@ func (gui *Gui) submitModal() error {
 			gui.closeModal()
 			return nil
 		}
+		if err := gui.validateModalFieldValues(); err != nil {
+			gui.modalMessage = err.Error()
+			return nil
+		}
+		gui.modalMessage = ""
 
 		selectedRecord := gui.currentRecords[gui.selectedRecordIdx]
 		fields := gui.convertModalFields()
 
 		err := viewer.UpdateRecord(gui.currentApp, gui.currentModel, selectedRecord.PK, fields)
 		if err != nil {
-			gui.showMessage("Error", fmt.Sprintf("Failed to update record: %v", err))
-			gui.closeModal()
+			gui.modalMessage = fmt.Sprintf("Update failed: %v", err)
 			return nil
 		}
 
@@ -1246,6 +1789,59 @@ func (gui *Gui) validateRequiredFields() error {
 	return nil
 }
 
+func (gui *Gui) validateModalFieldValues() error {
+	if err := gui.validateRequiredFields(); err != nil {
+		return err
+	}
+	return gui.validateConstrainedFields()
+}
+
+func (gui *Gui) validateConstrainedFields() error {
+	var viewer *django.DataViewer
+
+	for _, field := range gui.modalFields {
+		name, ok := field["name"].(string)
+		if !ok || name == "" {
+			continue
+		}
+		value := strings.TrimSpace(gui.modalValues[name])
+		if value == "" {
+			continue
+		}
+
+		if choiceOptions := gui.extractChoiceOptions(field); len(choiceOptions) > 0 {
+			if !pickerOptionsContainValue(choiceOptions, value) {
+				return fmt.Errorf("field '%s' must be one of: %s", name, pickerOptionsSummary(choiceOptions, 6))
+			}
+		}
+
+		fieldType, _ := field["type"].(string)
+		if fieldType != "ForeignKey" {
+			continue
+		}
+
+		relatedModel, relatedApp := gui.getRelatedModelFromField(field, name)
+		if strings.TrimSpace(relatedModel) == "" {
+			continue
+		}
+		if strings.TrimSpace(relatedApp) == "" {
+			relatedApp = gui.currentApp
+		}
+		if gui.project == nil {
+			return fmt.Errorf("cannot validate foreign key field '%s': project context missing", name)
+		}
+
+		if viewer == nil {
+			viewer = django.NewDataViewer(gui.project)
+		}
+		if _, err := viewer.GetRecord(relatedApp, relatedModel, value); err != nil {
+			return fmt.Errorf("field '%s' must reference an existing %s.%s record", name, relatedApp, relatedModel)
+		}
+	}
+
+	return nil
+}
+
 // convertModalFields converts modal string values to proper types
 func (gui *Gui) convertModalFields() map[string]interface{} {
 	fields := make(map[string]interface{})
@@ -1316,6 +1912,7 @@ func (gui *Gui) toggleBooleanField() error {
 		} else {
 			gui.modalValues[fieldName] = "false"
 		}
+		gui.modalMessage = ""
 	}
 
 	return nil

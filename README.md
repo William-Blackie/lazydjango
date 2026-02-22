@@ -110,6 +110,7 @@ Project panel actions are intentionally compact:
 - `e`: edit selected record
 - `d`: delete selected record
 - `Esc`: close model table view
+- in field picker modals: `/` search options, `n` load more FK rows, `x` clear nullable value
 
 ### Output (Command/Logs)
 
